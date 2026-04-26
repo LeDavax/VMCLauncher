@@ -7,13 +7,14 @@ import type {
 } from "../../shared/contracts";
 import type { PersistedServerRecord } from "./storage";
 import { OPENVMC_USER_AGENT, downloadFile } from "./downloads";
+import { getAddonMode, getAddonsDirectory } from "./server-layout";
 
 const MODRINTH_API_ROOT = "https://api.modrinth.com/v2";
 const CURSEFORGE_API_ROOT = "https://api.curseforge.com/v1";
 const HANGAR_API_ROOT = "https://hangar.papermc.io/api/v1";
 const CURSEFORGE_MINECRAFT_GAME_ID = 432;
 const CURSEFORGE_BUKKIT_PLUGINS_CLASS_ID = 5;
-const PAPER_LOADERS = ["paper", "folia", "purpur", "spigot", "bukkit"] as const;
+const CURSEFORGE_MINECRAFT_MODS_CLASS_ID = 6;
 
 interface ModrinthSearchResponse {
   hits: Array<{
@@ -38,6 +39,7 @@ interface ModrinthVersion {
   featured: boolean;
   date_published: string;
   game_versions: string[];
+  loaders?: string[];
   files: Array<{
     url: string;
     filename: string;
@@ -116,12 +118,16 @@ export class PluginMarketplaceService {
   ) {}
 
   async search(server: PersistedServerRecord, provider: PluginInstallRequest["provider"], query: string): Promise<PluginSearchResult[]> {
+    const mode = getAddonMode(server.kind);
     switch (provider) {
       case "modrinth":
         return this.searchModrinth(server, query);
       case "curseforge":
         return this.searchCurseForge(server, query);
       case "hangar":
+        if (mode !== "plugins") {
+          return [];
+        }
         return this.searchHangar(query, server.version);
       default:
         return [];
@@ -129,12 +135,16 @@ export class PluginMarketplaceService {
   }
 
   async install(server: PersistedServerRecord, request: PluginInstallRequest): Promise<PluginInstallResult> {
+    const mode = getAddonMode(server.kind);
     switch (request.provider) {
       case "modrinth":
         return this.installFromModrinth(server, request);
       case "curseforge":
         return this.installFromCurseForge(server, request);
       case "hangar":
+        if (mode !== "plugins") {
+          throw new Error("Hangar ne prend en charge que les serveurs plugins.");
+        }
         return this.installFromHangar(server, request);
       default:
         throw new Error("Source de plugin non supportee.");
@@ -144,6 +154,9 @@ export class PluginMarketplaceService {
   async listInstalledPlugins(server: PersistedServerRecord) {
     const { readdir, stat } = await import("node:fs/promises");
     const pluginsDir = getPaperPluginsDirectory(server);
+    if (!pluginsDir) {
+      return [];
+    }
 
     try {
       const entries = await readdir(pluginsDir, { withFileTypes: true });
@@ -171,14 +184,21 @@ export class PluginMarketplaceService {
   }
 
   private async searchModrinth(server: PersistedServerRecord, query: string): Promise<PluginSearchResult[]> {
+    const mode = getAddonMode(server.kind);
+    if (mode === "unsupported") {
+      return [];
+    }
+    const loaders = getModrinthLoaders(server.kind);
+    const projectType = mode === "plugins" ? "plugin" : "mod";
     const facets = JSON.stringify([
-      PAPER_LOADERS.map((loader) => `categories:${loader}`),
+      loaders.map((loader) => `categories:${loader}`),
       ["server_side:required", "server_side:optional", "server_side:unknown"],
     ]);
     const params = new URLSearchParams({
       query,
       limit: "20",
       facets,
+      project_type: projectType,
       index: "downloads",
     });
     const response = await fetchJson<ModrinthSearchResponse>(
@@ -197,16 +217,23 @@ export class PluginMarketplaceService {
       categories: hit.display_categories,
       updatedAt: hit.date_modified,
       latestVersionLabel: hit.latest_version,
-      websiteUrl: `https://modrinth.com/plugin/${hit.slug}`,
-      compatibleWithServer: hit.versions.includes(server.version),
+      websiteUrl: `https://modrinth.com/${projectType}/${hit.slug}`,
+      compatibleWithServer: hit.versions.some((version) => matchesModrinthGameVersion(version, server.version)),
     }));
   }
 
   private async searchCurseForge(server: PersistedServerRecord, query: string): Promise<PluginSearchResult[]> {
+    const mode = getAddonMode(server.kind);
+    if (mode === "unsupported") {
+      return [];
+    }
     const apiKey = this.requireCurseForgeApiKey();
+    const classId = mode === "plugins"
+      ? CURSEFORGE_BUKKIT_PLUGINS_CLASS_ID
+      : CURSEFORGE_MINECRAFT_MODS_CLASS_ID;
     const params = new URLSearchParams({
       gameId: String(CURSEFORGE_MINECRAFT_GAME_ID),
-      classId: String(CURSEFORGE_BUKKIT_PLUGINS_CLASS_ID),
+      classId: String(classId),
       searchFilter: query,
       gameVersion: server.version,
       pageSize: "20",
@@ -232,7 +259,11 @@ export class PluginMarketplaceService {
       categories: item.categories?.map((category) => category.name).filter(Boolean) as string[] ?? [],
       updatedAt: item.dateModified,
       latestVersionLabel: item.latestFilesIndexes?.find((entry) => entry.gameVersion === server.version)?.filename ?? null,
-      websiteUrl: item.links?.websiteUrl ?? `https://www.curseforge.com/minecraft/bukkit-plugins/${item.slug}`,
+      websiteUrl: item.links?.websiteUrl ?? (
+        mode === "plugins"
+          ? `https://www.curseforge.com/minecraft/bukkit-plugins/${item.slug}`
+          : `https://www.curseforge.com/minecraft/mc-mods/${item.slug}`
+      ),
       compatibleWithServer: item.latestFilesIndexes?.some((entry) => entry.gameVersion === server.version) ?? false,
     }));
   }
@@ -274,20 +305,65 @@ export class PluginMarketplaceService {
   }
 
   private async installFromModrinth(server: PersistedServerRecord, request: PluginInstallRequest): Promise<PluginInstallResult> {
+    const mode = getAddonMode(server.kind);
+    if (mode === "unsupported") {
+      throw new Error("Ce type de serveur ne prend pas en charge les plugins/mods.");
+    }
+    const acceptedLoaders = getModrinthLoaders(server.kind);
     const params = new URLSearchParams({
-      loaders: JSON.stringify([...PAPER_LOADERS]),
+      loaders: JSON.stringify(acceptedLoaders),
       game_versions: JSON.stringify([server.version]),
       include_changelog: "false",
     });
-    const versions = await fetchJson<ModrinthVersion[]>(
+    let versions = await fetchJson<ModrinthVersion[]>(
       `${MODRINTH_API_ROOT}/project/${encodeURIComponent(request.projectId)}/version?${params.toString()}`,
     );
-    const selectedVersion = [...versions]
-      .sort(compareModrinthVersions)
-      .find((version) => selectJarFile(version.files));
+
+    if (versions.length === 0) {
+      const relaxedParams = new URLSearchParams({
+        loaders: JSON.stringify(acceptedLoaders),
+        include_changelog: "false",
+      });
+      versions = await fetchJson<ModrinthVersion[]>(
+        `${MODRINTH_API_ROOT}/project/${encodeURIComponent(request.projectId)}/version?${relaxedParams.toString()}`,
+      );
+    }
+    if (versions.length === 0) {
+      const fullyRelaxedParams = new URLSearchParams({
+        include_changelog: "false",
+      });
+      versions = await fetchJson<ModrinthVersion[]>(
+        `${MODRINTH_API_ROOT}/project/${encodeURIComponent(request.projectId)}/version?${fullyRelaxedParams.toString()}`,
+      );
+    }
+
+    const sortedVersions = [...versions]
+      .sort(compareModrinthVersions);
+    const selectedVersion =
+      sortedVersions
+        .filter((version) => {
+          const compatibleGameVersion = version.game_versions.some((gameVersion) =>
+            matchesModrinthGameVersion(gameVersion, server.version),
+          );
+          if (!compatibleGameVersion) {
+            return false;
+          }
+          if (!version.loaders || version.loaders.length === 0) {
+            return true;
+          }
+          return version.loaders.some((loader) => acceptedLoaders.includes(loader));
+        })
+        .find((version) => selectJarFile(version.files))
+      ?? sortedVersions
+        .filter((version) =>
+          version.game_versions.some((gameVersion) =>
+            matchesModrinthGameVersion(gameVersion, server.version),
+          ),
+        )
+        .find((version) => selectJarFile(version.files));
 
     if (!selectedVersion) {
-      throw new Error(`Aucune version Modrinth compatible avec Paper ${server.version}.`);
+      throw new Error(`Aucune version Modrinth compatible avec ${server.kind} ${server.version}.`);
     }
 
     const selectedFile = selectJarFile(selectedVersion.files);
@@ -312,6 +388,10 @@ export class PluginMarketplaceService {
   }
 
   private async installFromCurseForge(server: PersistedServerRecord, request: PluginInstallRequest): Promise<PluginInstallResult> {
+    const mode = getAddonMode(server.kind);
+    if (mode === "unsupported") {
+      throw new Error("Ce type de serveur ne prend pas en charge les plugins/mods.");
+    }
     const apiKey = this.requireCurseForgeApiKey();
     const filesResponse = await fetchJson<CurseForgeResponse<CurseForgeFile[]>>(
       `${CURSEFORGE_API_ROOT}/mods/${encodeURIComponent(request.projectId)}/files?${new URLSearchParams({
@@ -330,7 +410,7 @@ export class PluginMarketplaceService {
       .find((file) => Boolean(file.downloadUrl));
 
     if (!selectedFile?.downloadUrl) {
-      throw new Error(`Aucun fichier CurseForge compatible avec Paper ${server.version}.`);
+      throw new Error(`Aucun fichier CurseForge compatible avec ${server.kind} ${server.version}.`);
     }
 
     const installedPath = await this.installDownloadedFile(server, {
@@ -353,6 +433,10 @@ export class PluginMarketplaceService {
   }
 
   private async installFromHangar(server: PersistedServerRecord, request: PluginInstallRequest): Promise<PluginInstallResult> {
+    const mode = getAddonMode(server.kind);
+    if (mode !== "plugins") {
+      throw new Error("Hangar ne prend en charge que les serveurs plugins.");
+    }
     const versions = await fetchJson<HangarVersionResponse>(
       `${HANGAR_API_ROOT}/projects/${encodeURIComponent(request.author)}/${encodeURIComponent(request.slug)}/versions?limit=30&offset=0`,
     );
@@ -406,6 +490,9 @@ export class PluginMarketplaceService {
     },
   ): Promise<string> {
     const pluginsDir = getPaperPluginsDirectory(server);
+    if (!pluginsDir) {
+      throw new Error("Ce type de serveur ne prend pas en charge les plugins/mods.");
+    }
     const cacheFile = path.join(
       this.cacheDir,
       "plugins",
@@ -430,8 +517,25 @@ export class PluginMarketplaceService {
   }
 }
 
-export function getPaperPluginsDirectory(server: PersistedServerRecord): string {
-  return path.join(server.rootDir, "paper", "plugins");
+export function getPaperPluginsDirectory(server: PersistedServerRecord): string | null {
+  return getAddonsDirectory(server.rootDir, server.kind);
+}
+
+function getModrinthLoaders(kind: PersistedServerRecord["kind"]): string[] {
+  switch (kind) {
+    case "papermc":
+      return ["paper", "folia", "spigot", "bukkit"];
+    case "purpur":
+      return ["purpur", "paper", "spigot", "bukkit"];
+    case "fabric":
+      return ["fabric"];
+    case "forge":
+      return ["forge"];
+    case "neoforge":
+      return ["neoforge"];
+    default:
+      return [];
+  }
 }
 
 function compareModrinthVersions(left: ModrinthVersion, right: ModrinthVersion): number {
@@ -479,6 +583,24 @@ function selectJarFile(files: ModrinthVersion["files"]) {
   return files.find((file) => file.primary && file.filename.toLowerCase().endsWith(".jar"))
     ?? files.find((file) => file.filename.toLowerCase().endsWith(".jar"))
     ?? null;
+}
+
+function matchesModrinthGameVersion(candidate: string, serverVersion: string): boolean {
+  const normalizedCandidate = normalizeGameVersion(candidate);
+  const normalizedServer = normalizeGameVersion(serverVersion);
+  if (!normalizedCandidate || !normalizedServer) {
+    return candidate === serverVersion;
+  }
+  if (normalizedCandidate === normalizedServer) {
+    return true;
+  }
+  return normalizedCandidate.startsWith(`${normalizedServer}.`)
+    || normalizedServer.startsWith(`${normalizedCandidate}.`);
+}
+
+function normalizeGameVersion(value: string): string | null {
+  const match = value.trim().match(/^\d+(?:\.\d+){1,2}$/);
+  return match ? match[0] : null;
 }
 
 function resolveHangarDownload(version: HangarVersion): string | null {

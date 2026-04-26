@@ -1,6 +1,13 @@
 import type { AccountSummary, AuthPayload, CreateServerPayload } from "../../shared/contracts";
 
 const DEFAULT_AUTH_API_BASE_URL = "http://217.182.205.254:25585";
+const REQUEST_TIMEOUT_MS = 15_000; // 15 secondes
+
+const LOGGER = {
+  error: (msg: string, error?: unknown) => console.error(`[OpenVmcAuthClient] ❌ ${msg}`, error),
+  info: (msg: string) => console.log(`[OpenVmcAuthClient] ℹ️ ${msg}`),
+  debug: (msg: string) => console.debug(`[OpenVmcAuthClient] 🔍 ${msg}`),
+};
 
 interface AuthApiResponse {
   token: string;
@@ -9,6 +16,12 @@ interface AuthApiResponse {
 
 interface RemoteServerReservation {
   id: string;
+}
+
+export interface VmcCompatibilityEntry {
+  kind: "vanilla" | "papermc" | "purpur" | "fabric" | "forge" | "neoforge";
+  version: string;
+  patchUrl: string;
 }
 
 export class OpenVmcAuthClient {
@@ -79,6 +92,12 @@ export class OpenVmcAuthClient {
     });
   }
 
+  async getVmcCompatibilityCatalog(): Promise<VmcCompatibilityEntry[]> {
+    return this.request<VmcCompatibilityEntry[]>("/v1/launcher/vmc-compatibility", {
+      method: "GET",
+    });
+  }
+
   async deleteRemoteServer(token: string, deviceId: string, serverId: string): Promise<void> {
     await this.request<void>(`/v1/launcher/servers/${serverId}`, {
       method: "DELETE",
@@ -103,33 +122,65 @@ export class OpenVmcAuthClient {
   }
 
   private async request<T>(pathname: string, init: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${pathname}`, {
-      ...init,
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        ...(init.headers ?? {}),
-      },
-    });
+    const url = `${this.baseUrl}${pathname}`;
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-    if (!response.ok) {
-      let message = `La requete OpenVMC a echoue (${response.status}).`;
-      try {
-        const payload = await response.json() as { message?: string };
-        if (payload.message) {
-          message = payload.message;
+    try {
+      LOGGER.debug(`📤 ${init.method ?? "GET"} ${url}`);
+      const response = await fetch(url, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          ...(init.headers ?? {}),
+        },
+      });
+
+      LOGGER.debug(`📥 ${response.status} ${url}`);
+
+      if (!response.ok) {
+        let message = `La requete OpenVMC a echoue (${response.status}).`;
+        try {
+          const payload = await response.json() as { message?: string };
+          if (payload.message) {
+            message = payload.message;
+          }
+        } catch {
+          // Ignore invalid JSON body.
         }
-      } catch {
-        // Ignore invalid JSON body.
+        LOGGER.error(`${init.method ?? "GET"} ${pathname} → ${response.status}: ${message}`);
+        throw new OpenVmcApiError(message, response.status);
       }
-      throw new OpenVmcApiError(message, response.status);
-    }
 
-    if (response.status === 204) {
-      return undefined as T;
-    }
+      if (response.status === 204) {
+        return undefined as T;
+      }
 
-    return response.json() as Promise<T>;
+      return response.json() as Promise<T>;
+    } catch (error) {
+      if (error instanceof OpenVmcApiError) {
+        throw error;
+      }
+
+      if (error instanceof Error && error.name === "AbortError") {
+        const msg = `Timeout lors de ${init.method ?? "GET"} ${pathname} après ${REQUEST_TIMEOUT_MS}ms - le serveur ne répond pas`;
+        LOGGER.error(msg);
+        throw new OpenVmcApiError(msg, 0);
+      }
+
+      if (error instanceof TypeError) {
+        const msg = `Erreur réseau lors de ${init.method ?? "GET"} ${pathname}: ${error.message}. Vérifiez votre connexion internet et que le serveur auth est accessible à ${this.baseUrl}`;
+        LOGGER.error(msg, error);
+        throw new OpenVmcApiError(msg, 0);
+      }
+
+      LOGGER.error(`Erreur inattendue lors de ${init.method ?? "GET"} ${pathname}`, error);
+      throw error;
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
   }
 }
 

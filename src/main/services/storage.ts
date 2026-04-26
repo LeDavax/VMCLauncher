@@ -75,6 +75,7 @@ export class LauncherStateStore {
         ...DEFAULT_STATE(),
         ...JSON.parse(raw),
       } as PersistedStateFile;
+      this.state.servers = this.state.servers.map((server) => migrateLegacyServer(server));
       console.log("[Storage] State loaded successfully.");
     } catch {
       console.log("[Storage] No state file found or error, using default.");
@@ -184,6 +185,22 @@ export class LauncherStateStore {
     }, 25564);
     return Math.max(25565, Math.floor(highestPort / 10) * 10 + 10);
   }
+}
+
+function migrateLegacyServer(server: PersistedServerRecord): PersistedServerRecord {
+  const legacyKind = server.kind as string;
+  if (legacyKind === "paper" || legacyKind === "paper-vmc") {
+    return {
+      ...server,
+      kind: "papermc",
+      vmc: {
+        ...server.vmc,
+        enabled: legacyKind === "paper-vmc" ? true : server.vmc.enabled,
+        state: legacyKind === "paper-vmc" ? server.vmc.state : "disabled",
+      },
+    };
+  }
+  return server;
 }
 
 export function slugify(value: string): string {

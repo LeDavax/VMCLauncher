@@ -23,11 +23,16 @@ import type {
 import { DEFAULT_SERVER_SETTINGS } from "../../shared/contracts";
 import { OpenVmcAuthClient } from "./auth-client";
 import { JavaRuntimeManager } from "./java-runtime";
-import { downloadFile, resolvePaperArtifact, resolveVelocityArtifact } from "./downloads";
+import { ServerCatalogService } from "./server-catalog";
+import { downloadFile, resolveVelocityArtifact } from "./downloads";
 import {
   PluginMarketplaceService,
   getPaperPluginsDirectory,
 } from "./plugin-marketplaces";
+import {
+  getAddonsDirectory,
+  getRuntimeDirectory,
+} from "./server-layout";
 import {
   LauncherStateStore,
   type PersistedServerRecord,
@@ -62,6 +67,7 @@ export class ServerManager {
   constructor(
     private readonly stateStore: LauncherStateStore,
     private readonly authClient: OpenVmcAuthClient,
+    private readonly catalogService: ServerCatalogService,
     private readonly javaManager: JavaRuntimeManager,
     private readonly cacheDir: string,
     private readonly emitEvent: (event: LauncherEvent) => void,
@@ -90,6 +96,13 @@ export class ServerManager {
     if (!token) {
       throw new Error("Session OpenVMC indisponible.");
     }
+    const catalogVersion = await this.catalogService.findVersion(payload.kind, payload.version);
+    if (!catalogVersion) {
+      throw new Error(
+        `La version ${payload.version} n'est pas presente dans le catalogue pour ${payload.kind}.`,
+      );
+    }
+    const vmcEnabled = Boolean(payload.vmcEnabled && catalogVersion.vmc.compatible);
     const rootDir = path.join(this.stateStore.getPaths().serversDir, `${slug}-${serverUuid}`);
     const remoteServer = await this.authClient.createRemoteServer(
       token,
@@ -98,7 +111,7 @@ export class ServerManager {
       serverUuid,
     );
     const paperPort = await this.findAvailablePort(25565);
-    const velocityPort = payload.kind === "paper-vmc" ? await this.findAvailablePort(paperPort + 1) : null;
+    const velocityPort = vmcEnabled ? await this.findAvailablePort(paperPort + 1) : null;
 
     const server: PersistedServerRecord = {
       serverUuid,
@@ -121,19 +134,19 @@ export class ServerManager {
         motd: payload.displayName.trim(),
       },
       vmc: {
-        enabled: payload.kind === "paper-vmc",
+        enabled: vmcEnabled,
         slug,
         mode: payload.vmcMode ?? "whitelist",
         whitelist: [owner.displayName],
         lastAccessCode: null,
         lastAccessCodeIssuedAt: null,
-        state: payload.kind === "paper-vmc" ? "connected" : "disabled",
+        state: vmcEnabled ? "connected" : "disabled",
       },
     };
 
     await this.ensureServerLayout(server);
-    await this.writePaperConfiguration(server);
-    if (server.kind === "paper-vmc") await this.writeVelocityConfiguration(server);
+    await this.writeServerConfiguration(server);
+    if (server.vmc.enabled) await this.writeVelocityConfiguration(server);
 
     await this.stateStore.addServer(server);
     return server;
@@ -148,9 +161,9 @@ export class ServerManager {
     }
 
     const token = this.stateStore.getAuthToken();
-    if (token) {
+    if (token && server.remoteServerId) {
       try {
-        await this.authClient.deleteRemoteServer(token, this.stateStore.getDeviceId(), serverUuid);
+        await this.authClient.deleteRemoteServer(token, this.stateStore.getDeviceId(), server.remoteServerId);
       } catch (err) {
         console.warn(`Echec de la suppression distante du serveur ${serverUuid}:`, err);
         // On continue quand même la suppression locale
@@ -169,8 +182,9 @@ export class ServerManager {
     });
 
     const token = this.stateStore.getAuthToken();
-    if (token) {
-      await this.authClient.renameRemoteServer(token, this.stateStore.getDeviceId(), serverUuid, newName).catch((err) => {
+    const server = this.stateStore.findServer(serverUuid);
+    if (token && server?.remoteServerId) {
+      await this.authClient.renameRemoteServer(token, this.stateStore.getDeviceId(), server.remoteServerId, newName).catch((err) => {
         console.warn(`Echec du renommage distant du serveur ${serverUuid}:`, err);
       });
     }
@@ -228,19 +242,20 @@ export class ServerManager {
         throw new Error(`Le port ${server.paperPort} est déjà utilisé par une autre application. Veuillez fermer l'application qui l'utilise ou changer le port dans les réglages.`);
       }
 
-      await this.prepareServerFiles(server);
+      await this.prepareServerFiles(server, javaExecutable);
 
-      const paperJar = path.join(server.rootDir, "paper", "paper.jar");
+      const runtimeDir = getRuntimeDirectory(server.rootDir, server.kind);
+      const launch = await this.resolveServerLaunch(server, runtimeDir);
       runtime.processes.paper = this.spawnProcess(
         server,
         runtime,
         "paper",
         javaExecutable,
-        [`-Xms${server.memoryMb}M`, `-Xmx${server.memoryMb}M`, "-jar", paperJar, "--nogui"],
-        path.join(server.rootDir, "paper"),
+        launch.args,
+        launch.cwd,
       );
 
-      if (server.kind === "paper-vmc") {
+      if (server.vmc.enabled) {
         const velocityJar = path.join(server.rootDir, "velocity", "velocity.jar");
         runtime.processes.velocity = this.spawnProcess(
           server,
@@ -397,7 +412,7 @@ export class ServerManager {
       settings: { ...server.settings, ...payload.settings },
       updatedAt: new Date().toISOString(),
     }));
-    await this.writePaperConfiguration(updated);
+      await this.writeServerConfiguration(updated);
     return updated;
   }
 
@@ -407,22 +422,46 @@ export class ServerManager {
       vmc: { ...server.vmc, ...payload.vmc },
       updatedAt: new Date().toISOString(),
     }));
-    if (updated.kind === "paper-vmc") {
+    if (updated.vmc.enabled) {
       await this.writeVelocityConfiguration(updated);
     }
     return updated;
   }
 
-  private async prepareServerFiles(server: PersistedServerRecord): Promise<void> {
-    const paperArtifact = await resolvePaperArtifact(server.version);
-    const cachedPaperJar = path.join(this.cacheDir, paperArtifact.fileName);
-    await downloadFile(paperArtifact.url, cachedPaperJar);
-    await copyFile(cachedPaperJar, path.join(server.rootDir, "paper", "paper.jar"));
-    await this.writePaperConfiguration(server);
+  private async prepareServerFiles(server: PersistedServerRecord, javaExecutable: string): Promise<void> {
+    const selectedVersion = await this.catalogService.findVersion(server.kind, server.version);
+    if (!selectedVersion) {
+      throw new Error(`Version ${server.version} introuvable pour ${server.kind}.`);
+    }
+    const runtimeDir = getRuntimeDirectory(server.rootDir, server.kind);
+    const serverFileName = deriveFileNameFromUrl(selectedVersion.downloadUrl, `${server.kind}-${server.version}.jar`);
+    const cachedServerJar = path.join(this.cacheDir, serverFileName);
+    await downloadFile(selectedVersion.downloadUrl, cachedServerJar);
+    if (server.kind === "forge" || server.kind === "neoforge") {
+      const installerJar = path.join(runtimeDir, "installer.jar");
+      await copyFile(cachedServerJar, installerJar);
+      await this.ensureForgeLikeRuntimeInstalled(server, javaExecutable, runtimeDir, installerJar);
+    } else {
+      await copyFile(cachedServerJar, path.join(runtimeDir, "server.jar"));
+    }
+    await this.writeServerConfiguration(server);
 
-    if (server.kind !== "paper-vmc") {
+    if (!server.vmc.enabled) {
       return;
     }
+
+    const patchUrl = selectedVersion.vmc.patchUrl;
+    if (!selectedVersion.vmc.compatible || !patchUrl) {
+      throw new Error(`La version ${server.version} (${server.kind}) n'est pas compatible avec OpenVMC.`);
+    }
+    const patchFileName = deriveFileNameFromUrl(patchUrl, `openvmc-${server.kind}-${server.version}-patch.jar`);
+    const cachedPatchFile = path.join(this.cacheDir, patchFileName);
+    await downloadFile(patchUrl, cachedPatchFile);
+    const addonsDir = getPaperPluginsDirectory(server);
+    if (!addonsDir) {
+      throw new Error("Impossible d'appliquer le patch VMC: aucun dossier plugins/mods pour ce type de serveur.");
+    }
+    await copyFile(cachedPatchFile, path.join(addonsDir, patchFileName));
 
     const velocityArtifact = await resolveVelocityArtifact();
     const cachedVelocityJar = path.join(this.cacheDir, velocityArtifact.fileName);
@@ -431,21 +470,88 @@ export class ServerManager {
     await this.writeVelocityConfiguration(server);
   }
 
+  private async resolveServerLaunch(
+    server: PersistedServerRecord,
+    runtimeDir: string,
+  ): Promise<{ cwd: string; args: string[] }> {
+    if (server.kind === "forge" || server.kind === "neoforge") {
+      const unixArgsPath = await findForgeLikeUnixArgs(runtimeDir, server.kind);
+      if (!unixArgsPath) {
+        throw new Error(
+          `Runtime ${server.kind} incomplet: unix_args.txt introuvable apres installation.`,
+        );
+      }
+      const relativeUnixArgs = path.relative(runtimeDir, unixArgsPath);
+      return {
+        cwd: runtimeDir,
+        args: [
+          `-Xms${server.memoryMb}M`,
+          `-Xmx${server.memoryMb}M`,
+          `@${relativeUnixArgs}`,
+        ],
+      };
+    }
+
+    const serverJar = path.join(runtimeDir, "server.jar");
+    return {
+      cwd: runtimeDir,
+      args: [`-Xms${server.memoryMb}M`, `-Xmx${server.memoryMb}M`, "-jar", serverJar, "--nogui"],
+    };
+  }
+
+  private async ensureForgeLikeRuntimeInstalled(
+    server: PersistedServerRecord,
+    javaExecutable: string,
+    runtimeDir: string,
+    installerJar: string,
+  ): Promise<void> {
+    const existingUnixArgs = await findForgeLikeUnixArgs(runtimeDir, server.kind);
+    if (existingUnixArgs) {
+      return;
+    }
+
+    try {
+      await execFileAsync(
+        javaExecutable,
+        ["-jar", installerJar, "--installServer", runtimeDir],
+        {
+          cwd: runtimeDir,
+          maxBuffer: 20 * 1024 * 1024,
+        },
+      );
+    } catch (error) {
+      const typed = error as Error & { stderr?: string };
+      const stderr = (typed.stderr ?? "").trim();
+      throw new Error(
+        `Installation ${server.kind} impossible: ${stderr || typed.message}`,
+      );
+    }
+
+    const installedUnixArgs = await findForgeLikeUnixArgs(runtimeDir, server.kind);
+    if (!installedUnixArgs) {
+      throw new Error(`Installation ${server.kind} terminee mais unix_args.txt est introuvable.`);
+    }
+  }
+
   private async ensureServerLayout(server: PersistedServerRecord): Promise<void> {
+    const runtimeDir = getRuntimeDirectory(server.rootDir, server.kind);
     await mkdir(server.rootDir, { recursive: true });
-    await mkdir(path.join(server.rootDir, "paper"), { recursive: true });
-    await mkdir(getPaperPluginsDirectory(server), { recursive: true });
-    if (server.kind === "paper-vmc") {
+    await mkdir(runtimeDir, { recursive: true });
+    const addonsDir = getAddonsDirectory(server.rootDir, server.kind);
+    if (addonsDir) {
+      await mkdir(addonsDir, { recursive: true });
+    }
+    if (server.vmc.enabled) {
       await mkdir(path.join(server.rootDir, "velocity"), { recursive: true });
       await mkdir(path.join(server.rootDir, "velocity", "plugins"), { recursive: true });
     }
   }
 
-  private async writePaperConfiguration(server: PersistedServerRecord): Promise<void> {
-    const paperDir = path.join(server.rootDir, "paper");
-    await mkdir(paperDir, { recursive: true });
-    await writeFile(path.join(paperDir, "eula.txt"), "eula=true\n", "utf8");
-    await writeFile(path.join(paperDir, "server.properties"), buildPaperProperties(server), "utf8");
+  private async writeServerConfiguration(server: PersistedServerRecord): Promise<void> {
+    const runtimeDir = getRuntimeDirectory(server.rootDir, server.kind);
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(path.join(runtimeDir, "eula.txt"), "eula=true\n", "utf8");
+    await writeFile(path.join(runtimeDir, "server.properties"), buildPaperProperties(server), "utf8");
   }
 
   private async writeVelocityConfiguration(server: PersistedServerRecord): Promise<void> {
@@ -472,14 +578,14 @@ export class ServerManager {
     });
 
     child.stdout.on("data", (chunk) => {
-      appendOutput(runtime, "info", `[${name}] ${chunk.toString("utf8")}`, this.emitEvent, server.serverUuid);
+      appendOutput(runtime, "info", chunk.toString("utf8"), this.emitEvent, server.serverUuid);
     });
     child.stderr.on("data", (chunk) => {
-      appendOutput(runtime, "error", `[${name}] ${chunk.toString("utf8")}`, this.emitEvent, server.serverUuid);
+      appendOutput(runtime, "error", chunk.toString("utf8"), this.emitEvent, server.serverUuid);
     });
 
     child.on("close", async (code) => {
-      appendOutput(runtime, code === 0 ? "info" : "error", `[${name}] process exited with code ${code ?? 0}`, this.emitEvent, server.serverUuid);
+      appendOutput(runtime, code === 0 ? "info" : "error", `Process exited with code ${code ?? 0}`, this.emitEvent, server.serverUuid);
       delete runtime.processes[name];
 
       if (!runtime.isStopping) {
@@ -714,7 +820,7 @@ export class ServerManager {
         const { stdout } = await execFileAsync("wmic", ["process", "where", "name='java.exe'", "get", "commandline,processid"]);
         const lines = stdout.split(/\r?\n/).slice(1).filter(Boolean);
         for (const line of lines) {
-          if (line.includes(serversDir) && (line.includes("paper.jar") || line.includes("velocity.jar"))) {
+          if (line.includes(serversDir) && (line.includes("server.jar") || line.includes("velocity.jar"))) {
             const match = line.match(/(\d+)\s*$/);
             if (match) {
               process.kill(Number.parseInt(match[1], 10), "SIGTERM");
@@ -727,7 +833,7 @@ export class ServerManager {
         const myPid = process.pid;
         for (const line of lines) {
           const trimmed = line.trim();
-          if (trimmed.includes(serversDir) && (trimmed.includes("paper.jar") || trimmed.includes("velocity.jar"))) {
+          if (trimmed.includes(serversDir) && (trimmed.includes("server.jar") || trimmed.includes("velocity.jar"))) {
             const pid = Number.parseInt(trimmed.split(/\s+/)[0], 10);
             if (!Number.isNaN(pid) && pid !== myPid) {
               process.kill(pid, "SIGTERM");
@@ -813,9 +919,45 @@ async function waitForProcessExit(child: ChildProcessWithoutNullStreams, timeout
   });
 }
 
+async function findForgeLikeUnixArgs(
+  runtimeDir: string,
+  kind: PersistedServerRecord["kind"],
+): Promise<string | null> {
+  const root = kind === "forge"
+    ? path.join(runtimeDir, "libraries", "net", "minecraftforge", "forge")
+    : path.join(runtimeDir, "libraries", "net", "neoforged", "neoforge");
+
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const absolutePath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(absolutePath);
+        continue;
+      }
+      if (entry.isFile() && entry.name === "unix_args.txt") {
+        return absolutePath;
+      }
+    }
+  }
+
+  return null;
+}
+
 function buildPaperProperties(server: PersistedServerRecord): string {
-  const onlineMode = server.kind === "paper" ? "true" : "false";
-  const serverIp = server.kind === "paper" ? "" : "127.0.0.1";
+  const onlineMode = server.vmc.enabled ? "false" : "true";
+  const serverIp = server.vmc.enabled ? "127.0.0.1" : "";
 
   return [
     `motd=${escapePropertiesValue(server.settings.motd)}`,
@@ -839,7 +981,17 @@ function buildPaperProperties(server: PersistedServerRecord): string {
 }
 
 function getRamLimitMb(server: PersistedServerRecord): number {
-  return server.memoryMb + (server.kind === "paper-vmc" ? 512 : 0);
+  return server.memoryMb + (server.vmc.enabled ? 512 : 0);
+}
+
+function deriveFileNameFromUrl(url: string, fallbackName: string): string {
+  try {
+    const parsed = new URL(url);
+    const fileName = path.basename(parsed.pathname);
+    return fileName || fallbackName;
+  } catch {
+    return fallbackName;
+  }
 }
 
 async function collectProcessStats(pids: number[]): Promise<Pick<ServerStats, "cpuPercent" | "ramUsedMb">> {

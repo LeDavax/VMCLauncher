@@ -29,9 +29,9 @@ const en: Translations = {
     loginCta: "Sign in",
     registerCta: "Create my account",
     busy: "Please wait…",
-    heroTitle: "Your local panel for Paper and Paper + VMC",
+    heroTitle: "Your local panel for Minecraft servers",
     heroSubtitle:
-      "Manage your servers, download official Paper stable builds, and connect a server to the VMC Network without leaving the app.",
+      "Manage your servers, download official stable builds, and connect a server to the VMC Network without leaving the app.",
     deviceLabel: "Device",
     deviceNote:
       "A free account can only be connected on one device at a time.",
@@ -45,7 +45,7 @@ const en: Translations = {
   },
 
   home: {
-    heroTagline: "Build, launch and route your Paper servers through VMC Network.",
+    heroTagline: "Build, launch and route your Minecraft servers through VMC Network.",
     myServers: "My servers",
     emptyHint: "Start by creating your first server.",
     activeHint: "Launch or open a local server.",
@@ -54,7 +54,7 @@ const en: Translations = {
 
   servers: {
     title: "My servers",
-    subtitle: "Paper and Paper + VMC, stored in app-managed folders.",
+    subtitle: "Minecraft servers stored in app-managed folders.",
   },
 
   status: {
@@ -101,6 +101,7 @@ const en: Translations = {
     editorPlaceholder: "Select a file on the left to open it.",
     newFile: "New file",
     createDirectory: "New folder",
+    root: "Root",
     upload: "Upload",
     back: "← Back",
     emptyFolder: "Empty folder",
@@ -113,6 +114,11 @@ const en: Translations = {
     serverName: "Server name",
     rename_action: "Save",
     saving_action: "Saving...",
+    namePlaceholder: "Name...",
+    saveContent: "Save",
+    savingContent: "Saving...",
+    jarEnabled: "JAR",
+    jarDisabled: "Disabled",
     download: "Download",
     renameSuccess: "File renamed successfully.",
     deleteSuccess: "File deleted successfully.",
@@ -121,20 +127,27 @@ const en: Translations = {
 
   plugins: {
     title: "Plugins",
+    modsTitle: "Mods",
     searchPlaceholder: "Search a plugin…",
+    modsSearchPlaceholder: "Search a mod…",
     searchBtn: "Search",
     recommended: "Recommended",
     folderNotice: "Local folder",
     installedTitle: "Installed",
+    modsInstalledTitle: "Installed mods",
     installedEmpty: "No plugin detected in the local folder.",
+    modsInstalledEmpty: "No mod detected in the local folder.",
     sourceLabel: "Source",
     searching: "Searching…",
     noResults: "No plugin matched this search.",
+    modsNoResults: "No mod matched this search.",
     install: "Install",
     installing: "Installing…",
     compatible: "Compatible",
     incompatible: "Compatibility to verify",
     installSuccess: "Plugin installed in the local folder.",
+    modsInstallSuccess: "Mod installed in the local folder.",
+    unsupportedType: "This server type does not support plugins/mods.",
     curseForgeKeyHint: "CurseForge requires an API key through the VMC_CURSEFORGE_API_KEY environment variable.",
     providers: {
       modrinth: "Modrinth",
@@ -188,10 +201,19 @@ const en: Translations = {
     name: "Server name",
     namePlaceholder: "Vanilla friends SMP",
     type: "Type",
-    version: "Paper version",
+    version: "Version",
     memory: "Allocated memory (MiB)",
     visibility: "VMC Network visibility",
     cta: "Create server",
+    paperRecommended: "PaperMC (recommended)",
+    vmcEnableRecommended: "Enable VMC (recommended)",
+    versionSearchPlaceholder: "Search a version...",
+    noVersionFound: "No version",
+  },
+
+  bootError: {
+    title: "Critical startup error",
+    retry: "Retry",
   },
 
   settingsPage: {

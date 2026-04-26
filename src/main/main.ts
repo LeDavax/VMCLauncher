@@ -11,8 +11,8 @@ import type {
   UpdateServerSettingsPayload,
   UpdateVmcSettingsPayload,
 } from "../shared/contracts";
-import { SERVER_CATALOG } from "../shared/contracts";
 import { OpenVmcApiError, OpenVmcAuthClient } from "./services/auth-client";
+import { ServerCatalogService } from "./services/server-catalog";
 import { JavaRuntimeManager } from "./services/java-runtime";
 import { ServerManager } from "./services/server-manager";
 import { createLauncherPaths, LauncherStateStore } from "./services/storage";
@@ -26,6 +26,7 @@ const serverWindows = new Map<string, BrowserWindow>();
 let stateStore: LauncherStateStore;
 let authClient: OpenVmcAuthClient;
 let serverManager: ServerManager;
+let catalogService: ServerCatalogService;
 let servicesReady: Promise<void> | null = null;
 
 function ensureServicesReady(): Promise<void> {
@@ -41,10 +42,12 @@ async function initializeServices(): Promise<void> {
   await stateStore.load();
 
   authClient = new OpenVmcAuthClient();
+  catalogService = new ServerCatalogService(authClient);
   const javaManager = new JavaRuntimeManager(paths.runtimesDir, paths.cacheDir);
   serverManager = new ServerManager(
     stateStore,
     authClient,
+    catalogService,
     javaManager,
     paths.cacheDir,
     broadcastEvent,
@@ -85,7 +88,8 @@ function createWindow() {
 ipcMain.handle("launcher:getSnapshot", async (): Promise<LauncherSnapshot> => {
   await ensureServicesReady();
   // await refreshRemoteAccountIfNeeded();
-  return stateStore.getSnapshot(serverManager.getActiveServerId(), SERVER_CATALOG);
+  const catalog = await catalogService.getCatalog();
+  return stateStore.getSnapshot(serverManager.getActiveServerId(), catalog);
 });
 
 ipcMain.handle("launcher:getServerDetails", async (_, serverUuid: string): Promise<ServerDetails> => {
@@ -95,16 +99,26 @@ ipcMain.handle("launcher:getServerDetails", async (_, serverUuid: string): Promi
 
 ipcMain.handle("launcher:register", async (_, payload: AuthPayload) => {
   await ensureServicesReady();
-  const session = await authClient.register(payload, stateStore.getDeviceId());
-  await stateStore.setAuthSession(session.token, session.account);
-  return session.account;
+  try {
+    const session = await authClient.register(payload, stateStore.getDeviceId());
+    await stateStore.setAuthSession(session.token, session.account);
+    return session.account;
+  } catch (error) {
+    console.error("[launcher:register] Erreur lors de l'inscription:", error);
+    throw error;
+  }
 });
 
 ipcMain.handle("launcher:login", async (_, payload: AuthPayload) => {
   await ensureServicesReady();
-  const session = await authClient.login(payload, stateStore.getDeviceId());
-  await stateStore.setAuthSession(session.token, session.account);
-  return session.account;
+  try {
+    const session = await authClient.login(payload, stateStore.getDeviceId());
+    await stateStore.setAuthSession(session.token, session.account);
+    return session.account;
+  } catch (error) {
+    console.error("[launcher:login] Erreur lors de la connexion:", error);
+    throw error;
+  }
 });
 
 ipcMain.handle("launcher:logout", async () => {
@@ -121,24 +135,39 @@ ipcMain.handle("launcher:logout", async () => {
 
 ipcMain.handle("launcher:createServer", async (_, payload: CreateServerPayload) => {
   await ensureServicesReady();
-  await refreshRemoteAccountIfNeeded();
-  const server = await serverManager.createServer(payload);
-  broadcastEvent({ type: "server-updated", serverUuid: server.serverUuid });
-  return server;
+  try {
+    await refreshRemoteAccountIfNeeded();
+    const server = await serverManager.createServer(payload);
+    broadcastEvent({ type: "server-updated", serverUuid: server.serverUuid });
+    return server;
+  } catch (error) {
+    console.error("[launcher:createServer] Erreur lors de la création du serveur:", error);
+    throw error;
+  }
 });
 
 ipcMain.handle("launcher:deleteServer", async (_, serverUuid: string) => {
   await ensureServicesReady();
-  const result = await serverManager.deleteServer(serverUuid);
-  broadcastEvent({ type: "state-changed" });
-  return result;
+  try {
+    const result = await serverManager.deleteServer(serverUuid);
+    broadcastEvent({ type: "state-changed" });
+    return result;
+  } catch (error) {
+    console.error("[launcher:deleteServer] Erreur lors de la suppression du serveur:", error);
+    throw error;
+  }
 });
 
 ipcMain.handle("launcher:renameServer", async (_, serverUuid: string, newName: string) => {
   await ensureServicesReady();
-  const result = await serverManager.renameServer(serverUuid, newName);
-  broadcastEvent({ type: "state-changed" });
-  return result;
+  try {
+    const result = await serverManager.renameServer(serverUuid, newName);
+    broadcastEvent({ type: "state-changed" });
+    return result;
+  } catch (error) {
+    console.error("[launcher:renameServer] Erreur lors du renommage du serveur:", error);
+    throw error;
+  }
 });
 
 ipcMain.handle("launcher:openServerWindow", async (_, serverUuid: string) => {

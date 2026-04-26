@@ -114,6 +114,7 @@ export interface Translations {
     editorPlaceholder: string;
     newFile: string;
     createDirectory: string;
+    root: string;
     upload: string;
     back: string;
     emptyFolder: string;
@@ -125,25 +126,37 @@ export interface Translations {
     serverName: string;
     rename_action: string;
     saving_action: string;
+    namePlaceholder: string;
+    saveContent: string;
+    savingContent: string;
+    jarEnabled: string;
+    jarDisabled: string;
   };
 
   // ── Plugins ───────────────────────────────────────────────────────────────
   plugins: {
     title: string;
+    modsTitle: string;
     searchPlaceholder: string;
+    modsSearchPlaceholder: string;
     searchBtn: string;
     recommended: string;
     folderNotice: string;
     installedTitle: string;
+    modsInstalledTitle: string;
     installedEmpty: string;
+    modsInstalledEmpty: string;
     sourceLabel: string;
     searching: string;
     noResults: string;
+    modsNoResults: string;
     install: string;
     installing: string;
     compatible: string;
     incompatible: string;
     installSuccess: string;
+    modsInstallSuccess: string;
+    unsupportedType: string;
     curseForgeKeyHint: string;
     providers: {
       modrinth: string;
@@ -191,6 +204,15 @@ export interface Translations {
     memory: string;
     visibility: string;
     cta: string;
+    paperRecommended: string;
+    vmcEnableRecommended: string;
+    versionSearchPlaceholder: string;
+    noVersionFound: string;
+  };
+
+  bootError: {
+    title: string;
+    retry: string;
   };
 
   // ── Settings page ─────────────────────────────────────────────────────────

@@ -53,6 +53,25 @@ const fadeIn = {
   exit: { opacity: 0, transition: { duration: 0.15 } },
 };
 
+const SERVER_KIND_LABEL: Record<ServerRecord["kind"], string> = {
+  vanilla: "Vanilla",
+  papermc: "PaperMC",
+  purpur: "Purpur",
+  forge: "Forge",
+  fabric: "Fabric",
+  neoforge: "NeoForge",
+};
+
+function getServerKindLabel(kind: ServerRecord["kind"]): string {
+  return SERVER_KIND_LABEL[kind] ?? kind;
+}
+
+function getAddonMode(kind: ServerRecord["kind"]): "plugins" | "mods" | "unsupported" {
+  if (kind === "papermc" || kind === "purpur") return "plugins";
+  if (kind === "fabric" || kind === "forge" || kind === "neoforge") return "mods";
+  return "unsupported";
+}
+
 // ─── Route types ──────────────────────────────────────────────────────────────
 type ParsedRoute =
   | { kind: "launcher"; route: LauncherRoute }
@@ -382,7 +401,7 @@ function ServerRow({ server, onOpen, onLaunch, onRename, onDelete }: { server: S
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 600, fontSize: 14, color: "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{server.displayName}</div>
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
-          {server.kind === "paper-vmc" ? "Paper + OpenVMC Proxy" : "Paper"} · {server.version}
+          {getServerKindLabel(server.kind)}{server.vmc.enabled ? " + OpenVMC" : ""} · {server.version}
         </div>
       </div>
       <StatusPill status={server.status} />
@@ -512,7 +531,7 @@ function ServerCard({ server, onOpen, onLaunch, onRename, onDelete }: { server: 
       </div>
       <div style={{ padding: "12px 14px" }}>
         <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{server.displayName}</div>
-        <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>{server.kind === "paper-vmc" ? "Paper + OpenVMC Proxy" : "Paper"}</div>
+        <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>{getServerKindLabel(server.kind)}{server.vmc.enabled ? " + OpenVMC" : ""}</div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <StatusPill status={server.status} />
           <Btn variant={isActive ? "ghost" : "primary"} onClick={(e) => { (e as unknown as MouseEvent).stopPropagation?.(); onLaunch(); }} style={{ padding: "5px 10px", fontSize: 12 }}>
@@ -614,17 +633,25 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 // ─── Create Server Dialog ─────────────────────────────────────────────────────
 function CreateServerDialog({ snapshot, onClose, onCreate }: { snapshot: LauncherSnapshot; onClose: () => void; onCreate: (p: CreateServerPayload) => Promise<void> }) {
   const { t } = useI18n();
-  const defaultCatalog = snapshot.catalog[0];
+  const defaultCatalog = snapshot.catalog.find((entry) => entry.kind === "papermc") ?? snapshot.catalog[0];
   const [kind, setKind] = useState<CreateServerPayload["kind"]>(defaultCatalog.kind);
   const versions = useMemo(
     () => snapshot.catalog.find((e) => e.kind === kind)?.versions ?? defaultCatalog.versions,
     [kind, snapshot.catalog]
   );
   const [displayName, setDisplayName] = useState("");
-  const [version, setVersion] = useState(versions[0]);
+  const [version, setVersion] = useState(versions[0]?.version ?? "");
   const [memoryMb, setMemoryMb] = useState(4096);
+  const [vmcEnabled, setVmcEnabled] = useState(false);
   const [vmcMode, setVmcMode] = useState<NetworkMode>("public");
-  useEffect(() => setVersion(versions[0]), [versions]);
+  const selectedVersion = useMemo(() => versions.find((v) => v.version === version) ?? null, [versions, version]);
+  const vmcCompatible = selectedVersion?.vmc.compatible ?? false;
+  useEffect(() => setVersion(versions[0]?.version ?? ""), [versions]);
+  useEffect(() => {
+    if (!vmcCompatible) {
+      setVmcEnabled(false);
+    }
+  }, [vmcCompatible]);
 
   return (
     <motion.div
@@ -640,25 +667,35 @@ function CreateServerDialog({ snapshot, onClose, onCreate }: { snapshot: Launche
         <h2 style={{ margin: "0 0 6px", fontSize: 18, fontWeight: 700 }}>{t.createServer.title}</h2>
         <p style={{ margin: "0 0 24px", fontSize: 13, color: "var(--text-soft)" }}>{t.createServer.subtitle}</p>
 
-        <form onSubmit={(e) => { e.preventDefault(); void onCreate({ displayName, kind, version, memoryMb, vmcMode }); }}
+        <form onSubmit={(e) => { e.preventDefault(); void onCreate({ displayName, kind, version, memoryMb, vmcEnabled, vmcMode: vmcEnabled ? vmcMode : undefined }); }}
           style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <FormField label={t.createServer.name}>
             <Input value={displayName} onChange={setDisplayName} placeholder={t.createServer.namePlaceholder} />
           </FormField>
           <FormField label={t.createServer.type}>
             <Select value={kind} onChange={(v) => setKind(v as CreateServerPayload["kind"])}>
-              {snapshot.catalog.map((e) => <option key={e.kind} value={e.kind}>{e.label}</option>)}
+              {snapshot.catalog.map((e) => (
+                <option key={e.kind} value={e.kind}>
+                  {e.kind === "papermc" ? t.createServer.paperRecommended : e.label}
+                </option>
+              ))}
             </Select>
           </FormField>
           <FormField label={t.createServer.version}>
-            <Select value={version} onChange={setVersion}>
-              {versions.map((v) => <option key={v} value={v}>{v}</option>)}
-            </Select>
+            <VersionSearchSelect versions={versions} value={version} onChange={setVersion} />
           </FormField>
+          {vmcCompatible && (
+            <FormField label="OpenVMC">
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text-soft)" }}>
+                <input type="checkbox" checked={vmcEnabled} onChange={(e) => setVmcEnabled(e.target.checked)} />
+                {t.createServer.vmcEnableRecommended}
+              </label>
+            </FormField>
+          )}
           <FormField label={t.createServer.memory}>
             <Input type="number" value={memoryMb} onChange={(v) => setMemoryMb(Number(v))} />
           </FormField>
-          {kind === "paper-vmc" && (
+          {vmcEnabled && (
             <FormField label={t.createServer.visibility}>
               <Select value={vmcMode} onChange={(v) => setVmcMode(v as NetworkMode)}>
                 <option value="public">{t.vmcSettings.modes.public}</option>
@@ -674,6 +711,114 @@ function CreateServerDialog({ snapshot, onClose, onCreate }: { snapshot: Launche
         </form>
       </motion.div>
     </motion.div>
+  );
+}
+
+function VersionSearchSelect({
+  versions,
+  value,
+  onChange,
+}: {
+  versions: LauncherSnapshot["catalog"][number]["versions"];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const { t } = useI18n();
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const filtered = useMemo(
+    () => versions.filter((entry) => entry.version.toLowerCase().includes(query.trim().toLowerCase())),
+    [versions, query],
+  );
+
+  useEffect(() => {
+    if (!filtered.some((entry) => entry.version === value) && filtered[0]) {
+      onChange(filtered[0].version);
+    }
+  }, [filtered, value, onChange]);
+
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        value={isTyping ? query : value}
+        onChange={(event) => {
+          setIsTyping(true);
+          setQuery(event.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => {
+          setIsTyping(true);
+          setQuery("");
+          setOpen(true);
+        }}
+        onBlur={() => {
+          setTimeout(() => {
+            setOpen(false);
+            setIsTyping(false);
+            setQuery("");
+          }, 120);
+        }}
+        placeholder={t.createServer.versionSearchPlaceholder}
+        style={{
+          width: "100%",
+          background: "#0f1115",
+          border: "1px solid #2d323d",
+          borderRadius: 4,
+          color: "#fff",
+          padding: "10px 12px",
+          outline: "none",
+          fontFamily: "JetBrains Mono, monospace",
+        }}
+      />
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            zIndex: 20,
+            top: "calc(100% + 6px)",
+            left: 0,
+            right: 0,
+            maxHeight: 220,
+            overflowY: "auto",
+            background: "#0f1115",
+            border: "1px solid #2d323d",
+            borderRadius: 4,
+          }}
+        >
+          {filtered.length === 0 && (
+            <div style={{ padding: "10px 12px", color: "var(--text-muted)", fontSize: 12 }}>
+              {t.createServer.noVersionFound}
+            </div>
+          )}
+          {filtered.map((entry) => (
+            <button
+              key={entry.version}
+              type="button"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onChange(entry.version);
+                setOpen(false);
+                setIsTyping(false);
+                setQuery("");
+              }}
+              style={{
+                width: "100%",
+                textAlign: "left",
+                background: entry.version === value ? "rgba(63,176,43,0.2)" : "transparent",
+                border: "none",
+                color: "#fff",
+                padding: "8px 10px",
+                cursor: "pointer",
+                fontFamily: "JetBrains Mono, monospace",
+              }}
+            >
+              {entry.version}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -697,7 +842,8 @@ function ServerPanel({
 }) {
   const { t } = useI18n();
   const isRunning = details.server.status === "running";
-  const isPlugins = details.server.kind === "paper" || details.server.kind === "paper-vmc";
+  const addonMode = getAddonMode(details.server.kind);
+  const isPlugins = addonMode === "plugins";
 
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden" }}>
@@ -705,13 +851,13 @@ function ServerPanel({
       <aside style={{ width: 220, background: "var(--bg-sidebar)", borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", flexShrink: 0 }}>
         <div style={{ padding: "20px 16px 16px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ fontWeight: 700, fontSize: 15, color: "#fff", marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{details.server.displayName}</div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{details.server.kind === "paper-vmc" ? "Paper + OpenVMC Proxy" : "Paper"}</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{getServerKindLabel(details.server.kind)}{details.server.vmc.enabled ? " + OpenVMC" : ""}</div>
         </div>
         <nav style={{ flex: 1, padding: "8px 8px", display: "flex", flexDirection: "column", gap: 2 }}>
           <ServerNavLink active={route === "console"} label={t.serverNav.console} onClick={() => onNavigate("console")} />
           <ServerNavLink active={route === "files"} label={t.serverNav.files} onClick={() => onNavigate("files")} />
           <ServerNavLink active={route === "plugins"} label={isPlugins ? t.serverNav.plugins : t.serverNav.mods} onClick={() => onNavigate("plugins")} />
-          <ServerNavLink active={route === "settings"} label={t.serverNav.serverSettings} suffix="paper" onClick={() => onNavigate("settings")} />
+          <ServerNavLink active={route === "settings"} label={t.serverNav.serverSettings} suffix={details.server.kind} onClick={() => onNavigate("settings")} />
           <ServerNavLink active={route === "vmc"} label={t.serverNav.vmcSettings} suffix="vmc" onClick={() => onNavigate("vmc")} />
         </nav>
       </aside>
@@ -814,11 +960,15 @@ function ConsoleView({ details, onCommand }: { details: ServerDetails; onCommand
 function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { details: ServerDetails; onReloadDetails: () => Promise<void>; withFeedback: (work: () => Promise<void>) => Promise<void>; setFeedback: (m: string | null) => void }) {
   console.log("[Renderer] FilesView mounting with files count:", details?.files?.length);
   const { t } = useI18n();
-  
-  const [currentDirectory, setCurrentDirectory] = useState(() => {
+
+  const rootDirectory = useMemo(() => {
     if (!details?.files) return "";
-    return details.files.some(f => f.path === "paper" && f.kind === "directory") ? "paper" : "";
-  });
+    if (details.files.some((f) => f.path === "server" && f.kind === "directory")) return "server";
+    if (details.files.some((f) => f.path === "paper" && f.kind === "directory")) return "paper";
+    return "";
+  }, [details?.files]);
+
+  const [currentDirectory, setCurrentDirectory] = useState(() => rootDirectory);
 
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [content, setContent] = useState("");
@@ -828,6 +978,12 @@ function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { de
   const [fileError, setFileError] = useState<string | null>(null);
   const [creationModal, setCreationModal] = useState<{ kind: "file" | "directory" | "rename"; target?: FileEntry } | null>(null);
   const [creationName, setCreationName] = useState("");
+
+  useEffect(() => {
+    if (!currentDirectory && rootDirectory) {
+      setCurrentDirectory(rootDirectory);
+    }
+  }, [currentDirectory, rootDirectory]);
 
   const currentItems = useMemo(() => {
     if (!details?.files) return [];
@@ -982,13 +1138,16 @@ function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { de
 
 
   const handleNavigateUp = () => {
-    if (currentDirectory === "") return;
+    if (currentDirectory === "" || currentDirectory === rootDirectory) return;
     const parts = currentDirectory.split("/");
     parts.pop();
-    setCurrentDirectory(parts.join("/"));
+    const next = parts.join("/");
+    setCurrentDirectory(next || rootDirectory);
   };
 
   const breadcrumbParts = currentDirectory ? currentDirectory.split("/") : [];
+  const visibleBreadcrumbParts =
+    rootDirectory && breadcrumbParts[0] === rootDirectory ? breadcrumbParts.slice(1) : breadcrumbParts;
 
   const getLanguage = (filename: string | null) => {
     if (!filename) return 'none';
@@ -1038,6 +1197,8 @@ function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { de
   const fileBreadcrumbParts = selectedFile ? selectedFile.split("/") : [];
   const fileName = fileBreadcrumbParts.pop();
   const fileDirParts = fileBreadcrumbParts;
+  const visibleFileDirParts =
+    rootDirectory && fileDirParts[0] === rootDirectory ? fileDirParts.slice(1) : fileDirParts;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", padding: "24px 32px", overflow: "hidden", background: "var(--bg)", position: "relative" }}>
@@ -1051,7 +1212,7 @@ function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { de
             <Input 
               value={creationName} 
               onChange={setCreationName} 
-              placeholder="Nom..." 
+              placeholder={t.files.namePlaceholder}
               autoFocus 
               onKeyDown={(e: any) => {
                 if (e.key === "Enter") performCreation();
@@ -1059,8 +1220,8 @@ function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { de
               }}
             />
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 24 }}>
-              <Btn variant="ghost" onClick={() => setCreationModal(null)}>{t.cancel || "Annuler"}</Btn>
-              <Btn variant="primary" onClick={performCreation} disabled={!creationName.trim()}>{t.confirm || "Confirmer"}</Btn>
+              <Btn variant="ghost" onClick={() => setCreationModal(null)}>{t.cancel}</Btn>
+              <Btn variant="primary" onClick={performCreation} disabled={!creationName.trim()}>{t.create}</Btn>
             </div>
           </motion.div>
         </div>
@@ -1071,21 +1232,22 @@ function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { de
           <span 
             style={{ cursor: "pointer", color: "var(--text)", fontWeight: 600 }} 
             onClick={() => {
-              setCurrentDirectory("");
+              setCurrentDirectory(rootDirectory || "");
               setSelectedFile(null);
             }}
           >
-            {details.server.name}
+            server
           </span>
 
           
           {!selectedFile ? (
-            breadcrumbParts.map((part, idx) => {
-              const pathSoFar = breadcrumbParts.slice(0, idx + 1).join("/");
+            visibleBreadcrumbParts.map((part, idx) => {
+              const relativePath = visibleBreadcrumbParts.slice(0, idx + 1).join("/");
+              const pathSoFar = rootDirectory ? `${rootDirectory}/${relativePath}` : relativePath;
               return (
                 <span key={pathSoFar} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ color: "var(--text-muted)" }}>/</span>
-                  <span style={{ cursor: "pointer", color: idx === breadcrumbParts.length - 1 ? "#fff" : "var(--text)", fontWeight: idx === breadcrumbParts.length - 1 ? 600 : 400 }} onClick={() => setCurrentDirectory(pathSoFar)}>
+                  <span style={{ cursor: "pointer", color: idx === visibleBreadcrumbParts.length - 1 ? "#fff" : "var(--text)", fontWeight: idx === visibleBreadcrumbParts.length - 1 ? 600 : 400 }} onClick={() => setCurrentDirectory(pathSoFar)}>
                     {part}
                   </span>
                 </span>
@@ -1093,8 +1255,9 @@ function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { de
             })
           ) : (
             <>
-              {fileDirParts.map((part, idx) => {
-                const pathSoFar = fileDirParts.slice(0, idx + 1).join("/");
+              {visibleFileDirParts.map((part, idx) => {
+                const relativePath = visibleFileDirParts.slice(0, idx + 1).join("/");
+                const pathSoFar = rootDirectory ? `${rootDirectory}/${relativePath}` : relativePath;
                 // On permet de cliquer sur n'importe quel dossier parent du chemin
                 return (
                   <span key={pathSoFar} style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1183,7 +1346,7 @@ function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { de
           <div style={{ flex: 1, overflow: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: 13 }}>
               <tbody>
-                {(currentDirectory !== "" && currentDirectory !== "paper") && (
+                {currentDirectory !== "" && (
                   <tr
                     onClick={handleNavigateUp}
                     style={{ borderBottom: "1px solid var(--border)", cursor: "pointer", transition: "background 0.1s" }}
@@ -1303,7 +1466,7 @@ function FilesView({ details, onReloadDetails, withFeedback, setFeedback }: { de
                 onClick={handleSave}
                 style={{ background: "#3b82f6", boxShadow: "0 2px 0 #2563eb", color: "#fff", opacity: (!dirty || saving) ? 0.6 : 1 }}
               >
-                {saving ? "SAVING..." : "SAVE CONTENT"}
+                {saving ? t.files.savingContent : t.files.saveContent}
               </Btn>
             </div>
           </div>
@@ -1325,6 +1488,8 @@ function PluginsView({
   onInstall: (payload: PluginInstallRequest) => Promise<void>;
 }) {
   const { t } = useI18n();
+  const addonMode = getAddonMode(details.server.kind);
+  const isMods = addonMode === "mods";
   const [provider, setProvider] = useState<PluginProvider>("modrinth");
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
@@ -1337,7 +1502,11 @@ function PluginsView({
     setLocalFeedback(null);
   }, [provider, details.server.serverUuid]);
 
-  const pluginsDir = `${details.server.rootDir}/paper/plugins`;
+  useEffect(() => {
+    if (addonMode !== "plugins" && provider === "hangar") {
+      setProvider("modrinth");
+    }
+  }, [addonMode, provider]);
 
   async function handleSearch() {
     const trimmed = query.trim();
@@ -1350,6 +1519,11 @@ function PluginsView({
     setSearching(true);
     setLocalFeedback(null);
     try {
+      if (addonMode === "unsupported") {
+        setLocalFeedback(t.plugins.unsupportedType);
+        setResults([]);
+        return;
+      }
       const nextResults = await onSearch({
         serverUuid: details.server.serverUuid,
         provider,
@@ -1357,7 +1531,7 @@ function PluginsView({
       });
       setResults(nextResults);
       if (nextResults.length === 0) {
-        setLocalFeedback(t.plugins.noResults);
+        setLocalFeedback(isMods ? t.plugins.modsNoResults : t.plugins.noResults);
       }
     } catch (error) {
       setLocalFeedback(error instanceof Error ? error.message : t.error);
@@ -1377,7 +1551,7 @@ function PluginsView({
         slug: result.slug,
         author: result.author,
       });
-      setLocalFeedback(t.plugins.installSuccess);
+      setLocalFeedback(isMods ? t.plugins.modsInstallSuccess : t.plugins.installSuccess);
     } catch (error) {
       setLocalFeedback(error instanceof Error ? error.message : t.error);
     } finally {
@@ -1388,14 +1562,16 @@ function PluginsView({
   return (
     <div style={{ padding: "24px", display: "flex", flexDirection: "column", gap: 24 }}>
       <div>
-        <h2 style={{ margin: "0 0 20px", fontSize: 17, fontWeight: 700 }}>{t.plugins.title}</h2>
+        <h2 style={{ margin: "0 0 20px", fontSize: 17, fontWeight: 700 }}>{isMods ? t.plugins.modsTitle : t.plugins.title}</h2>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ minWidth: 180 }}>
             <FormField label={t.plugins.sourceLabel}>
               <Select value={provider} onChange={(value) => setProvider(value as PluginProvider)}>
                 <option value="modrinth">{t.plugins.providers.modrinth}</option>
                 <option value="curseforge">{t.plugins.providers.curseforge}</option>
-                <option value="hangar">{t.plugins.providers.hangar}</option>
+                {addonMode === "plugins" && (
+                  <option value="hangar">{t.plugins.providers.hangar}</option>
+                )}
               </Select>
             </FormField>
           </div>
@@ -1408,7 +1584,7 @@ function PluginsView({
                 void handleSearch();
               }
             }}
-            placeholder={t.plugins.searchPlaceholder}
+            placeholder={isMods ? t.plugins.modsSearchPlaceholder : t.plugins.searchPlaceholder}
             style={{ flex: 1, minWidth: 260, background: "var(--bg-input)", border: "1px solid var(--border-hover)", borderRadius: 4, color: "var(--text)", padding: "8px 12px", outline: "none", marginTop: 20 }}
           />
           <Btn variant="outline" onClick={() => void handleSearch()} disabled={searching} style={{ marginTop: 20 }}>
@@ -1419,7 +1595,16 @@ function PluginsView({
           <p style={{ margin: "0 0 12px", fontSize: 12, color: "var(--text-muted)" }}>{t.plugins.curseForgeKeyHint}</p>
         )}
         {localFeedback && (
-          <div style={{ marginBottom: 12, fontSize: 12, color: localFeedback === t.plugins.installSuccess ? "var(--green-light)" : "#ffb4a8" }}>
+          <div
+            style={{
+              marginBottom: 12,
+              fontSize: 12,
+              color:
+                localFeedback === t.plugins.installSuccess || localFeedback === t.plugins.modsInstallSuccess
+                  ? "var(--green-light)"
+                  : "#ffb4a8",
+            }}
+          >
             {localFeedback}
           </div>
         )}
@@ -1427,11 +1612,11 @@ function PluginsView({
 
       <section>
         <div style={{ marginBottom: 12, fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--text-muted)" }}>
-          {t.plugins.installedTitle}
+          {isMods ? t.plugins.modsInstalledTitle : t.plugins.installedTitle}
         </div>
         <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
           {details.plugins.length === 0 ? (
-            <div style={{ padding: "14px 16px", fontSize: 13, color: "var(--text-soft)" }}>{t.plugins.installedEmpty}</div>
+            <div style={{ padding: "14px 16px", fontSize: 13, color: "var(--text-soft)" }}>{isMods ? t.plugins.modsInstalledEmpty : t.plugins.installedEmpty}</div>
           ) : details.plugins.map((plugin, index) => (
             <div key={plugin.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 16px", borderBottom: index < details.plugins.length - 1 ? "1px solid var(--border)" : "none" }}>
               <div style={{ minWidth: 0 }}>
@@ -1439,7 +1624,7 @@ function PluginsView({
                 <div style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "JetBrains Mono, monospace" }}>{plugin.fileName}</div>
               </div>
               <span style={{ fontSize: 11, color: plugin.enabled ? "var(--green-light)" : "var(--text-muted)" }}>
-                {plugin.enabled ? "JAR" : "DISABLED"}
+                {plugin.enabled ? t.files.jarEnabled : t.files.jarDisabled}
               </span>
             </div>
           ))}
@@ -1758,12 +1943,26 @@ export function App() {
   // ── Boot / Loading ──────────────────────────────────────────────────────
   if (bootError) {
     return (
-      <div style={{ display: "grid", placeItems: "center", height: "100vh", background: "#1a0505", color: "#ff8888", padding: 40, textAlign: "center" }}>
-        <div>
-          <div style={{ fontSize: 24, fontWeight: 800, marginBottom: 16 }}>CRITICAL BOOT ERROR</div>
-          <code style={{ background: "rgba(0,0,0,0.3)", padding: "8px 12px", borderRadius: 4, display: "block", marginBottom: 16 }}>{bootError}</code>
-          <div style={{ marginTop: 24 }}>
-            <button onClick={() => window.location.reload()} style={{ background: "#ff8888", color: "#1a0505", border: "none", padding: "10px 20px", borderRadius: 4, fontWeight: 800, cursor: "pointer" }}>RETRY</button>
+      <div style={{ display: "grid", placeItems: "center", height: "100vh", background: "var(--bg)", color: "var(--text)", padding: 24 }}>
+        <div style={{ width: "min(720px, 100%)", background: "var(--bg-card)", border: "1px solid rgba(214, 74, 74, 0.5)", borderRadius: 10, padding: 20 }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#ff9f93", marginBottom: 12 }}>{t.bootError.title}</div>
+          <div
+            style={{
+              background: "rgba(214, 74, 74, 0.14)",
+              border: "1px solid rgba(214, 74, 74, 0.35)",
+              borderRadius: 6,
+              color: "#ffd2cb",
+              padding: "12px 14px",
+              fontSize: 13,
+              lineHeight: 1.5,
+              fontFamily: "JetBrains Mono, monospace",
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {bootError}
+          </div>
+          <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end" }}>
+            <Btn variant="primary" onClick={() => window.location.reload()}>{t.bootError.retry}</Btn>
           </div>
         </div>
       </div>
@@ -1804,7 +2003,7 @@ export function App() {
     }
     return (
       <>
-        {feedback && <FeedbackBar message={feedback} />}
+        {feedback && <FeedbackBar message={feedback} onClose={() => setFeedback(null)} />}
         <ServerPanel
           details={details}
           route={route.route}
@@ -1827,7 +2026,7 @@ export function App() {
   // ── Launcher shell ──────────────────────────────────────────────────────
   return (
     <>
-      {feedback && <FeedbackBar message={feedback} />}
+      {feedback && <FeedbackBar message={feedback} onClose={() => setFeedback(null)} />}
       <div style={{ display: "flex", height: "100vh", overflow: "hidden" }}>
         {/* Sidebar */}
         <aside style={{ width: 220, background: "var(--bg-sidebar)", borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", flexShrink: 0 }}>
@@ -1885,13 +2084,49 @@ export function App() {
 }
 
 // ─── Feedback toast ───────────────────────────────────────────────────────────
-function FeedbackBar({ message }: { message: string }) {
+function FeedbackBar({ message, onClose }: { message: string; onClose: () => void }) {
+  const { t } = useI18n();
   return (
     <motion.div
       initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-      style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", zIndex: 200, background: "rgba(192,57,43,0.92)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,100,80,0.4)", color: "#ffd6d2", padding: "10px 18px", borderRadius: 6, fontSize: 13, boxShadow: "0 4px 20px rgba(0,0,0,0.4)" }}
+      style={{
+        position: "fixed",
+        top: 16,
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 200,
+        background: "rgba(33, 37, 48, 0.95)",
+        backdropFilter: "blur(8px)",
+        border: "1px solid rgba(214, 74, 74, 0.5)",
+        color: "#ffe6e2",
+        borderRadius: 8,
+        fontSize: 13,
+        boxShadow: "0 8px 30px rgba(0,0,0,0.4)",
+        minWidth: 320,
+        maxWidth: "min(92vw, 860px)",
+      }}
     >
-      {message}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 12px 10px 14px" }}>
+        <div style={{ width: 4, alignSelf: "stretch", borderRadius: 999, background: "#d64a4a", flexShrink: 0 }} />
+        <div style={{ flex: 1, whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{message}</div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={t.close}
+          style={{
+            border: "none",
+            background: "transparent",
+            color: "#ffd7d1",
+            cursor: "pointer",
+            fontSize: 16,
+            lineHeight: 1,
+            padding: 0,
+            marginTop: 1,
+          }}
+        >
+          ×
+        </button>
+      </div>
     </motion.div>
   );
 }

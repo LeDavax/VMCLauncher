@@ -1,4 +1,4 @@
-export type ServerKind = "paper" | "paper-vmc";
+export type ServerKind = "vanilla" | "papermc" | "purpur" | "fabric" | "forge" | "neoforge";
 export type ServerStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 export type NetworkMode = "public" | "code" | "whitelist";
 export type NetworkState = "disabled" | "disconnected" | "connecting" | "connected" | "error";
@@ -144,7 +144,16 @@ export interface ServerCatalogEntry {
   kind: ServerKind;
   label: string;
   subtitle: string;
-  versions: string[];
+  versions: ServerCatalogVersionEntry[];
+}
+
+export interface ServerCatalogVersionEntry {
+  version: string;
+  downloadUrl: string;
+  vmc: {
+    compatible: boolean;
+    patchUrl: string | null;
+  };
 }
 
 export interface LauncherSnapshot {
@@ -174,6 +183,7 @@ export interface CreateServerPayload {
   kind: ServerKind;
   version: string;
   memoryMb: number;
+  vmcEnabled?: boolean;
   vmcMode?: NetworkMode;
 }
 
@@ -232,18 +242,3 @@ export const DEFAULT_SERVER_SETTINGS: ServerSettings = {
   simulationDistance: 10,
   motd: "An OpenVMC server",
 };
-
-export const SERVER_CATALOG: ServerCatalogEntry[] = [
-  {
-    kind: "paper",
-    label: "Paper",
-    subtitle: "Builds stables Paper officielles",
-    versions: ["1.21.11", "1.21.4", "1.20.6", "1.20.1"],
-  },
-  {
-    kind: "paper-vmc",
-    label: "Paper + VMC",
-    subtitle: "Paper avec connexion sortante VMC Network",
-    versions: ["1.21.11", "1.21.4", "1.20.6", "1.20.1"],
-  },
-];
