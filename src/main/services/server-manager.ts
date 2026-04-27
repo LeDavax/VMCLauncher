@@ -61,6 +61,7 @@ const execFileAsync = promisify(execFile);
 
 export class ServerManager {
   private readonly runtimes = new Map<string, RuntimeState>();
+  private readonly consoleHistory = new Map<string, ConsoleLine[]>();
   private activeServerId: string | null = null;
   private readonly pluginMarketplace: PluginMarketplaceService;
 
@@ -171,6 +172,7 @@ export class ServerManager {
     }
     
     await this.stateStore.deleteServer(serverUuid);
+    this.consoleHistory.delete(serverUuid);
     await rm(server.rootDir, { recursive: true, force: true }).catch(() => {});
     this.emitEvent({ type: "state-changed" });
   }
@@ -204,7 +206,7 @@ export class ServerManager {
     return {
       server,
       stats,
-      consoleLines: runtime?.consoleLines ?? [],
+      consoleLines: runtime?.consoleLines ?? this.consoleHistory.get(serverUuid) ?? [],
       files: await readManagedFiles(server.rootDir),
       plugins: await this.pluginMarketplace.listInstalledPlugins(server),
     };
@@ -225,7 +227,7 @@ export class ServerManager {
     const runtime: RuntimeState = {
       startedAt: Date.now(),
       isStopping: false,
-      consoleLines: [],
+      consoleLines: [...(this.consoleHistory.get(serverUuid) ?? [])],
       processes: {},
       stats: buildInitialStats(server),
       statsTimer: null,
@@ -278,6 +280,7 @@ export class ServerManager {
       this.appendConsoleLine(runtime, "info", `OpenVMC: serveur ${server.displayName} demarre.`);
     } catch (error) {
       this.appendConsoleLine(runtime, "error", `OpenVMC: ${(error as Error).message}`);
+      this.consoleHistory.set(serverUuid, [...runtime.consoleLines]);
       this.runtimes.delete(serverUuid);
       this.activeServerId = null;
       await this.patchServer(serverUuid, (current) => ({
@@ -320,6 +323,7 @@ export class ServerManager {
 
     await Promise.all(processes.map((process) => waitForProcessExit(process.child, 10_000)));
     this.stopStatsPolling(runtime);
+    this.consoleHistory.set(serverUuid, [...runtime.consoleLines]);
     this.runtimes.delete(serverUuid);
     if (this.activeServerId === serverUuid) {
       this.activeServerId = null;
@@ -595,6 +599,7 @@ export class ServerManager {
         for (const other of otherProcesses) {
           other.child.kill("SIGTERM");
         }
+        this.consoleHistory.set(server.serverUuid, [...runtime.consoleLines]);
         this.runtimes.delete(server.serverUuid);
         if (this.activeServerId === server.serverUuid) {
           this.activeServerId = null;
