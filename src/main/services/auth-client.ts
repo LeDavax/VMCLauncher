@@ -19,7 +19,7 @@ interface RemoteServerReservation {
 }
 
 export interface VmcCompatibilityEntry {
-  kind: "vanilla" | "papermc" | "purpur" | "fabric" | "forge" | "neoforge";
+  kind: "vanilla" | "papermc" | "fabric" | "forge" | "neoforge";
   version: string;
   patchUrl: string;
 }

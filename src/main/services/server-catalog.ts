@@ -25,10 +25,9 @@ export class ServerCatalogService {
       return this.cache.entries;
     }
 
-    const [vanilla, papermc, purpur, fabric, forge, neoforge, vmcCompat] = await Promise.all([
+    const [vanilla, papermc, fabric, forge, neoforge, vmcCompat] = await Promise.all([
       this.safeFetchProvider(fetchVanillaVersions),
       this.safeFetchProvider(fetchPaperVersions),
-      this.safeFetchProvider(fetchPurpurVersions),
       this.safeFetchProvider(fetchFabricVersions),
       this.safeFetchProvider(fetchForgeVersions),
       this.safeFetchProvider(fetchNeoForgeVersions),
@@ -43,7 +42,6 @@ export class ServerCatalogService {
     const entries: ServerCatalogEntry[] = [
       buildCatalogEntry("vanilla", "Minecraft Vanilla", vanilla, vmcIndex),
       buildCatalogEntry("papermc", "PaperMC", papermc, vmcIndex),
-      buildCatalogEntry("purpur", "Purpur", purpur, vmcIndex),
       buildCatalogEntry("fabric", "Fabric", fabric, vmcIndex),
       buildCatalogEntry("forge", "Forge", forge, vmcIndex),
       buildCatalogEntry("neoforge", "NeoForge", neoforge, vmcIndex),
@@ -95,6 +93,7 @@ function buildCatalogEntry(
       return {
         version,
         downloadUrl,
+        javaVersion: resolveRequiredJavaVersion(kind, version),
         vmc: {
           compatible: Boolean(patchUrl),
           patchUrl,
@@ -145,17 +144,6 @@ async function fetchPaperVersions(): Promise<ProviderVersions> {
       results[version] = stable.downloads["server:default"].url;
     }
   });
-  return results;
-}
-
-async function fetchPurpurVersions(): Promise<ProviderVersions> {
-  const payload = await fetchJson<{ versions: string[] }>("https://api.purpurmc.org/v2/purpur");
-  const results: ProviderVersions = {};
-  for (const version of payload.versions ?? []) {
-    if (!PRE_RELEASE_RE.test(version)) {
-      results[version] = `https://api.purpurmc.org/v2/purpur/${encodeURIComponent(version)}/latest/download`;
-    }
-  }
   return results;
 }
 
@@ -225,6 +213,37 @@ function mapNeoForgeMinecraftVersion(major: string, minor: string): string {
     return `${major}.${minor}`;
   }
   return `1.${major}.${minor}`;
+}
+
+function resolveRequiredJavaVersion(kind: ServerKind, version: string): number {
+  if (kind === "forge") {
+    return resolveForgeJavaVersion(version);
+  }
+  if (kind === "neoforge") {
+    return resolveNeoForgeJavaVersion(version);
+  }
+  return resolveVanillaLikeJavaVersion(version);
+}
+
+function resolveVanillaLikeJavaVersion(version: string): number {
+  if (compareVersionLike(version, "26.1") >= 0) return 25;
+  if (compareVersionLike(version, "1.20.5") >= 0) return 21;
+  if (compareVersionLike(version, "1.18") >= 0) return 17;
+  if (compareVersionLike(version, "1.17") >= 0) return 16;
+  if (compareVersionLike(version, "1.12") >= 0) return 11;
+  return 8;
+}
+
+function resolveForgeJavaVersion(version: string): number {
+  if (compareVersionLike(version, "1.21") >= 0) return 21;
+  if (compareVersionLike(version, "1.18") >= 0) return 17;
+  if (compareVersionLike(version, "1.17") >= 0) return 16;
+  return 8;
+}
+
+function resolveNeoForgeJavaVersion(version: string): number {
+  if (compareVersionLike(version, "26.1") >= 0) return 25;
+  return 21;
 }
 
 async function fetchJson<T>(url: string): Promise<T> {

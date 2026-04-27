@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { LauncherEvent } from "../shared/contracts";
 
 // Expose safe APIs to renderer process
 contextBridge.exposeInMainWorld("electronAPI", {
@@ -33,9 +34,10 @@ contextBridge.exposeInMainWorld("vmcLauncher", {
   updateServerSettings: (payload: any) => ipcRenderer.invoke("launcher:updateServerSettings", payload),
   updateVmcSettings: (payload: any) => ipcRenderer.invoke("launcher:updateVmcSettings", payload),
   log: (...args: any[]) => ipcRenderer.invoke("launcher:log", ...args),
-  onEvent: (callback: () => void) => {
-    ipcRenderer.on("launcher:event", callback);
-    return () => ipcRenderer.removeListener("launcher:event", callback);
+  onEvent: (callback: (event: LauncherEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: LauncherEvent) => callback(payload);
+    ipcRenderer.on("launcher:event", listener);
+    return () => ipcRenderer.removeListener("launcher:event", listener);
   },
 });
 

@@ -6,30 +6,52 @@ import { downloadFile, resolveTemurinBinaryUrl } from "./downloads";
 
 const execFileAsync = promisify(execFile);
 
+export interface JavaInstallProgress {
+  detail: string;
+  percent: number;
+}
+
 export class JavaRuntimeManager {
   constructor(
     private readonly runtimesDir: string,
     private readonly cacheDir: string,
   ) {}
 
-  async ensureJavaExecutable(): Promise<string> {
-    const runtimeRoot = path.join(this.runtimesDir, "temurin-21", `${process.platform}-${process.arch}`);
+  async ensureJavaExecutable(
+    version: number,
+    onProgress?: (progress: JavaInstallProgress) => void,
+  ): Promise<string> {
+    const runtimeRoot = path.join(this.runtimesDir, `temurin-${version}`, `${process.platform}-${process.arch}`);
     const existing = await findJavaExecutable(runtimeRoot);
     if (existing) {
+      onProgress?.({ detail: `Java ${version} deja disponible`, percent: 100 });
       return existing;
     }
 
     await mkdir(runtimeRoot, { recursive: true });
     const extension = process.platform === "win32" ? "zip" : "tar.gz";
-    const archivePath = path.join(this.cacheDir, `temurin-21-${process.platform}-${process.arch}.${extension}`);
+    const archivePath = path.join(this.cacheDir, `temurin-${version}-${process.platform}-${process.arch}.${extension}`);
 
     let downloadError: Error | null = null;
     for (const imageType of ["jre", "jdk"] as const) {
       try {
-        await downloadFile(resolveTemurinBinaryUrl(process.platform, process.arch, imageType), archivePath);
+        onProgress?.({ detail: `Telechargement de Java ${version} (${imageType.toUpperCase()})`, percent: 15 });
+        await downloadFile(
+          resolveTemurinBinaryUrl(version, process.platform, process.arch, imageType),
+          archivePath,
+          undefined,
+          (progress) => {
+            onProgress?.({
+              detail: `Telechargement de Java ${version} (${imageType.toUpperCase()})`,
+              percent: progress.percent ? Math.max(15, Math.min(80, 15 + Math.round(progress.percent * 0.65))) : 35,
+            });
+          },
+        );
+        onProgress?.({ detail: `Extraction de Java ${version}`, percent: 85 });
         await this.extractArchive(archivePath, runtimeRoot);
         const resolved = await findJavaExecutable(runtimeRoot);
         if (resolved) {
+          onProgress?.({ detail: `Java ${version} pret`, percent: 100 });
           return resolved;
         }
       } catch (error) {

@@ -189,10 +189,13 @@ export class LauncherStateStore {
 
 function migrateLegacyServer(server: PersistedServerRecord): PersistedServerRecord {
   const legacyKind = server.kind as string;
+  const normalizedKind = legacyKind === "purpur" ? "papermc" : legacyKind;
   if (legacyKind === "paper" || legacyKind === "paper-vmc") {
     return {
       ...server,
       kind: "papermc",
+      cpuCores: server.cpuCores ?? 2,
+      javaVersion: server.javaVersion ?? 21,
       vmc: {
         ...server.vmc,
         enabled: legacyKind === "paper-vmc" ? true : server.vmc.enabled,
@@ -200,7 +203,12 @@ function migrateLegacyServer(server: PersistedServerRecord): PersistedServerReco
       },
     };
   }
-  return server;
+  return {
+    ...server,
+    kind: normalizedKind as PersistedServerRecord["kind"],
+    cpuCores: server.cpuCores ?? 2,
+    javaVersion: server.javaVersion ?? 21,
+  };
 }
 
 export function slugify(value: string): string {

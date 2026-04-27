@@ -202,8 +202,14 @@ export interface Translations {
     type: string;
     version: string;
     memory: string;
+    cpuCores: string;
+    cpuCoresHint: string;
+    requiredJava: string;
     visibility: string;
     cta: string;
+    installing: string;
+    installingTitle: string;
+    stepLabel: string;
     paperRecommended: string;
     vmcEnableRecommended: string;
     versionSearchPlaceholder: string;

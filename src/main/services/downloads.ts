@@ -1,7 +1,6 @@
 import { createWriteStream } from "node:fs";
 import { mkdir, rename, stat } from "node:fs/promises";
 import path from "node:path";
-import { pipeline } from "node:stream/promises";
 
 const PAPERMC_API_ROOT = "https://fill.papermc.io/v3";
 const ADOPTIUM_API_ROOT = "https://api.adoptium.net/v3";
@@ -22,6 +21,12 @@ export interface DownloadArtifact {
   buildId?: number;
   fileName: string;
   url: string;
+}
+
+export interface DownloadProgress {
+  receivedBytes: number;
+  totalBytes: number | null;
+  percent: number | null;
 }
 
 export async function resolvePaperArtifact(version: string): Promise<DownloadArtifact> {
@@ -64,14 +69,20 @@ export async function resolveVelocityArtifact(): Promise<DownloadArtifact> {
   };
 }
 
-export function resolveTemurinBinaryUrl(platform: NodeJS.Platform, arch: string, imageType: "jre" | "jdk"): string {
-  return `${ADOPTIUM_API_ROOT}/binary/latest/21/ga/${mapPlatform(platform)}/${mapArch(arch)}/${imageType}/hotspot/normal/eclipse?project=jdk`;
+export function resolveTemurinBinaryUrl(
+  version: number,
+  platform: NodeJS.Platform,
+  arch: string,
+  imageType: "jre" | "jdk",
+): string {
+  return `${ADOPTIUM_API_ROOT}/binary/latest/${version}/ga/${mapPlatform(platform)}/${mapArch(arch)}/${imageType}/hotspot/normal/eclipse?project=jdk`;
 }
 
 export async function downloadFile(
   url: string,
   destination: string,
   extraHeaders?: Record<string, string>,
+  onProgress?: (progress: DownloadProgress) => void,
 ): Promise<void> {
   await mkdir(path.dirname(destination), { recursive: true });
 
@@ -97,7 +108,37 @@ export async function downloadFile(
     throw new Error(`Echec du telechargement depuis ${url} (${response.status}).`);
   }
 
-  await pipeline(response.body, createWriteStream(temporaryFile));
+  const totalBytesHeader = response.headers.get("content-length");
+  const totalBytes = totalBytesHeader ? Number.parseInt(totalBytesHeader, 10) : null;
+  let receivedBytes = 0;
+  const output = createWriteStream(temporaryFile);
+  const reader = response.body.getReader();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (!value) {
+        continue;
+      }
+      receivedBytes += value.byteLength;
+      output.write(Buffer.from(value));
+      onProgress?.({
+        receivedBytes,
+        totalBytes,
+        percent: totalBytes && totalBytes > 0 ? Math.round((receivedBytes / totalBytes) * 100) : null,
+      });
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      output.on("finish", resolve);
+      output.on("error", reject);
+      output.end();
+    });
+  }
+
   await rename(temporaryFile, destination);
 }
 

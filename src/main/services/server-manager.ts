@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import type {
   ConsoleLine,
   CreateServerPayload,
+  InstallationProgress,
   LauncherEvent,
   PluginInstallRequest,
   PluginInstallResult,
@@ -123,6 +124,8 @@ export class ServerManager {
       kind: payload.kind,
       version: payload.version,
       memoryMb: payload.memoryMb,
+      cpuCores: Math.max(1, Math.floor(payload.cpuCores || 1)),
+      javaVersion: catalogVersion.javaVersion,
       status: "stopped",
       createdAt: now,
       updatedAt: now,
@@ -145,12 +148,70 @@ export class ServerManager {
       },
     };
 
-    await this.ensureServerLayout(server);
-    await this.writeServerConfiguration(server);
-    if (server.vmc.enabled) await this.writeVelocityConfiguration(server);
+    this.emitInstallationProgress({
+      serverUuid,
+      stage: "preparing",
+      detail: "Preparation du serveur",
+      currentStep: 0,
+      totalSteps: 6,
+      percent: 0,
+      done: false,
+    });
 
-    await this.stateStore.addServer(server);
-    return server;
+    try {
+      await this.ensureServerLayout(server);
+      this.emitInstallationProgress({
+        serverUuid,
+        stage: "java",
+        detail: `Verification de Java ${server.javaVersion}`,
+        currentStep: 1,
+        totalSteps: 6,
+        percent: 8,
+        done: false,
+      });
+      const javaExecutable = await this.javaManager.ensureJavaExecutable(server.javaVersion, (progress) => {
+        this.emitStepProgress(serverUuid, "java", progress.detail, 1, 6, progress.percent);
+      });
+      await this.prepareServerFiles(server, javaExecutable, (stage, detail, percent) => {
+        const stepMap: Record<string, number> = {
+          "download-server": 2,
+          "install-server": 3,
+          "write-config": 4,
+          "install-vmc": 5,
+          completed: 6,
+        };
+        const step = stepMap[stage] ?? 2;
+        this.emitStepProgress(serverUuid, stage, detail, step, 6, percent);
+      });
+      await this.stateStore.addServer(server);
+      this.emitInstallationProgress({
+        serverUuid,
+        stage: "completed",
+        detail: "Serveur pret",
+        currentStep: 6,
+        totalSteps: 6,
+        percent: 100,
+        done: true,
+      });
+      return server;
+    } catch (error) {
+      if (token && remoteServer.id) {
+        await this.authClient
+          .deleteRemoteServer(token, this.stateStore.getDeviceId(), remoteServer.id)
+          .catch(() => {});
+      }
+      await rm(rootDir, { recursive: true, force: true }).catch(() => {});
+      this.emitInstallationProgress({
+        serverUuid,
+        stage: "error",
+        detail: (error as Error).message,
+        currentStep: 6,
+        totalSteps: 6,
+        percent: 100,
+        done: true,
+      });
+      throw error;
+    }
   }
 
   async deleteServer(serverUuid: string): Promise<void> {
@@ -237,14 +298,17 @@ export class ServerManager {
     this.emitEvent({ type: "state-changed", serverUuid });
 
     try {
-      const javaExecutable = await this.javaManager.ensureJavaExecutable();
+      const javaExecutable = await this.javaManager.ensureJavaExecutable(server.javaVersion);
       
       const isPortAvailable = await checkPortAvailability(server.paperPort);
       if (!isPortAvailable) {
         throw new Error(`Le port ${server.paperPort} est déjà utilisé par une autre application. Veuillez fermer l'application qui l'utilise ou changer le port dans les réglages.`);
       }
 
-      await this.prepareServerFiles(server, javaExecutable);
+      await this.writeServerConfiguration(server);
+      if (server.vmc.enabled) {
+        await this.writeVelocityConfiguration(server);
+      }
 
       const runtimeDir = getRuntimeDirectory(server.rootDir, server.kind);
       const launch = await this.resolveServerLaunch(server, runtimeDir);
@@ -432,7 +496,11 @@ export class ServerManager {
     return updated;
   }
 
-  private async prepareServerFiles(server: PersistedServerRecord, javaExecutable: string): Promise<void> {
+  private async prepareServerFiles(
+    server: PersistedServerRecord,
+    javaExecutable: string,
+    onProgress?: (stage: string, detail: string, percent: number) => void,
+  ): Promise<void> {
     const selectedVersion = await this.catalogService.findVersion(server.kind, server.version);
     if (!selectedVersion) {
       throw new Error(`Version ${server.version} introuvable pour ${server.kind}.`);
@@ -440,17 +508,29 @@ export class ServerManager {
     const runtimeDir = getRuntimeDirectory(server.rootDir, server.kind);
     const serverFileName = deriveFileNameFromUrl(selectedVersion.downloadUrl, `${server.kind}-${server.version}.jar`);
     const cachedServerJar = path.join(this.cacheDir, serverFileName);
-    await downloadFile(selectedVersion.downloadUrl, cachedServerJar);
+    onProgress?.("download-server", `Telechargement de ${server.kind} ${server.version}`, 10);
+    await downloadFile(selectedVersion.downloadUrl, cachedServerJar, undefined, (progress) => {
+      onProgress?.(
+        "download-server",
+        `Telechargement de ${server.kind} ${server.version}`,
+        progress.percent ?? 50,
+      );
+    });
     if (server.kind === "forge" || server.kind === "neoforge") {
       const installerJar = path.join(runtimeDir, "installer.jar");
       await copyFile(cachedServerJar, installerJar);
-      await this.ensureForgeLikeRuntimeInstalled(server, javaExecutable, runtimeDir, installerJar);
+      onProgress?.("install-server", `Installation de ${server.kind}`, 20);
+      await this.ensureForgeLikeRuntimeInstalled(server, javaExecutable, runtimeDir, installerJar, (detail, percent) => {
+        onProgress?.("install-server", detail, percent);
+      });
     } else {
       await copyFile(cachedServerJar, path.join(runtimeDir, "server.jar"));
     }
+    onProgress?.("write-config", "Ecriture des fichiers serveur", 40);
     await this.writeServerConfiguration(server);
 
     if (!server.vmc.enabled) {
+      onProgress?.("completed", "Installation terminee", 100);
       return;
     }
 
@@ -460,7 +540,10 @@ export class ServerManager {
     }
     const patchFileName = deriveFileNameFromUrl(patchUrl, `openvmc-${server.kind}-${server.version}-patch.jar`);
     const cachedPatchFile = path.join(this.cacheDir, patchFileName);
-    await downloadFile(patchUrl, cachedPatchFile);
+    onProgress?.("install-vmc", "Telechargement du patch OpenVMC", 10);
+    await downloadFile(patchUrl, cachedPatchFile, undefined, (progress) => {
+      onProgress?.("install-vmc", "Telechargement du patch OpenVMC", progress.percent ?? 40);
+    });
     const addonsDir = getPaperPluginsDirectory(server);
     if (!addonsDir) {
       throw new Error("Impossible d'appliquer le patch VMC: aucun dossier plugins/mods pour ce type de serveur.");
@@ -469,9 +552,14 @@ export class ServerManager {
 
     const velocityArtifact = await resolveVelocityArtifact();
     const cachedVelocityJar = path.join(this.cacheDir, velocityArtifact.fileName);
-    await downloadFile(velocityArtifact.url, cachedVelocityJar);
+    onProgress?.("install-vmc", "Telechargement de Velocity", 65);
+    await downloadFile(velocityArtifact.url, cachedVelocityJar, undefined, (progress) => {
+      const percent = progress.percent ? 65 + Math.round(progress.percent * 0.35) : 80;
+      onProgress?.("install-vmc", "Telechargement de Velocity", Math.min(100, percent));
+    });
     await copyFile(cachedVelocityJar, path.join(server.rootDir, "velocity", "velocity.jar"));
     await this.writeVelocityConfiguration(server);
+    onProgress?.("completed", "Installation terminee", 100);
   }
 
   private async resolveServerLaunch(
@@ -489,6 +577,7 @@ export class ServerManager {
       return {
         cwd: runtimeDir,
         args: [
+          `-XX:ActiveProcessorCount=${server.cpuCores}`,
           `-Xms${server.memoryMb}M`,
           `-Xmx${server.memoryMb}M`,
           `@${relativeUnixArgs}`,
@@ -499,7 +588,14 @@ export class ServerManager {
     const serverJar = path.join(runtimeDir, "server.jar");
     return {
       cwd: runtimeDir,
-      args: [`-Xms${server.memoryMb}M`, `-Xmx${server.memoryMb}M`, "-jar", serverJar, "--nogui"],
+      args: [
+        `-XX:ActiveProcessorCount=${server.cpuCores}`,
+        `-Xms${server.memoryMb}M`,
+        `-Xmx${server.memoryMb}M`,
+        "-jar",
+        serverJar,
+        "--nogui",
+      ],
     };
   }
 
@@ -508,13 +604,16 @@ export class ServerManager {
     javaExecutable: string,
     runtimeDir: string,
     installerJar: string,
+    onProgress?: (detail: string, percent: number) => void,
   ): Promise<void> {
     const existingUnixArgs = await findForgeLikeUnixArgs(runtimeDir, server.kind);
     if (existingUnixArgs) {
+      onProgress?.(`${server.kind} deja installe`, 100);
       return;
     }
 
     try {
+      onProgress?.(`Execution de l'installateur ${server.kind}`, 40);
       await execFileAsync(
         javaExecutable,
         ["-jar", installerJar, "--installServer", runtimeDir],
@@ -535,6 +634,7 @@ export class ServerManager {
     if (!installedUnixArgs) {
       throw new Error(`Installation ${server.kind} terminee mais unix_args.txt est introuvable.`);
     }
+    onProgress?.(`${server.kind} installe`, 100);
   }
 
   private async ensureServerLayout(server: PersistedServerRecord): Promise<void> {
@@ -579,6 +679,7 @@ export class ServerManager {
     const child = spawn(executable, args, {
       cwd,
       stdio: "pipe",
+      windowsHide: true,
     });
 
     child.stdout.on("data", (chunk) => {
@@ -628,6 +729,35 @@ export class ServerManager {
     }
   }
 
+  private emitInstallationProgress(progress: InstallationProgress): void {
+    this.emitEvent({
+      type: "installation-progress",
+      serverUuid: progress.serverUuid ?? undefined,
+      progress,
+    });
+  }
+
+  private emitStepProgress(
+    serverUuid: string,
+    stage: string,
+    detail: string,
+    currentStep: number,
+    totalSteps: number,
+    stepPercent: number,
+  ): void {
+    const boundedStepPercent = Math.max(0, Math.min(100, stepPercent));
+    const percent = Math.round((((currentStep - 1) + boundedStepPercent / 100) / totalSteps) * 100);
+    this.emitInstallationProgress({
+      serverUuid,
+      stage,
+      detail,
+      currentStep,
+      totalSteps,
+      percent,
+      done: false,
+    });
+  }
+
   private startStatsPolling(server: PersistedServerRecord, runtime: RuntimeState): void {
     runtime.statsTimer = setInterval(() => {
       this.refreshRuntimeStats(server, runtime).catch((err) => {
@@ -662,7 +792,7 @@ export class ServerManager {
     runtime.stats = {
       uptimeSeconds: runtime.startedAt ? Math.max(0, Math.floor((Date.now() - runtime.startedAt) / 1000)) : 0,
       cpuPercent: processStats.cpuPercent,
-      cpuLimitPercent: 100,
+      cpuLimitPercent: getCpuLimitPercent(server),
       ramUsedMb: processStats.ramUsedMb,
       ramLimitMb: getRamLimitMb(server),
       storageMb,
@@ -900,7 +1030,7 @@ function buildInitialStats(server: PersistedServerRecord): ServerStats {
   return {
     uptimeSeconds: 0,
     cpuPercent: 0,
-    cpuLimitPercent: 100,
+    cpuLimitPercent: getCpuLimitPercent(server),
     ramUsedMb: 0,
     ramLimitMb: getRamLimitMb(server),
     storageMb: 0,
@@ -987,6 +1117,11 @@ function buildPaperProperties(server: PersistedServerRecord): string {
 
 function getRamLimitMb(server: PersistedServerRecord): number {
   return server.memoryMb + (server.vmc.enabled ? 512 : 0);
+}
+
+function getCpuLimitPercent(server: PersistedServerRecord): number {
+  const maxCores = Math.max(1, availableParallelism());
+  return Math.round((Math.max(1, server.cpuCores) / maxCores) * 100);
 }
 
 function deriveFileNameFromUrl(url: string, fallbackName: string): string {

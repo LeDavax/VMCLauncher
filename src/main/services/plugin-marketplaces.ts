@@ -525,8 +525,6 @@ function getModrinthLoaders(kind: PersistedServerRecord["kind"]): string[] {
   switch (kind) {
     case "papermc":
       return ["paper", "folia", "spigot", "bukkit"];
-    case "purpur":
-      return ["purpur", "paper", "spigot", "bukkit"];
     case "fabric":
       return ["fabric"];
     case "forge":

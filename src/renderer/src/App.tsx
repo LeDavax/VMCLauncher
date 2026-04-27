@@ -16,6 +16,7 @@ import Prism from "./lib/prism";
 import type {
   AuthPayload,
   CreateServerPayload,
+  InstallationProgress,
   LauncherRoute,
   LauncherSnapshot,
   PluginInstallRequest,
@@ -56,7 +57,6 @@ const fadeIn = {
 const SERVER_KIND_LABEL: Record<ServerRecord["kind"], string> = {
   vanilla: "Vanilla",
   papermc: "PaperMC",
-  purpur: "Purpur",
   forge: "Forge",
   fabric: "Fabric",
   neoforge: "NeoForge",
@@ -67,7 +67,7 @@ function getServerKindLabel(kind: ServerRecord["kind"]): string {
 }
 
 function getAddonMode(kind: ServerRecord["kind"]): "plugins" | "mods" | "unsupported" {
-  if (kind === "papermc" || kind === "purpur") return "plugins";
+  if (kind === "papermc") return "plugins";
   if (kind === "fabric" || kind === "forge" || kind === "neoforge") return "mods";
   return "unsupported";
 }
@@ -631,7 +631,19 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 }
 
 // ─── Create Server Dialog ─────────────────────────────────────────────────────
-function CreateServerDialog({ snapshot, onClose, onCreate }: { snapshot: LauncherSnapshot; onClose: () => void; onCreate: (p: CreateServerPayload) => Promise<void> }) {
+function CreateServerDialog({
+  snapshot,
+  onClose,
+  onCreate,
+  busy,
+  installationProgress,
+}: {
+  snapshot: LauncherSnapshot;
+  onClose: () => void;
+  onCreate: (p: CreateServerPayload) => Promise<void>;
+  busy: boolean;
+  installationProgress: InstallationProgress | null;
+}) {
   const { t } = useI18n();
   const defaultCatalog = snapshot.catalog.find((entry) => entry.kind === "papermc") ?? snapshot.catalog[0];
   const [kind, setKind] = useState<CreateServerPayload["kind"]>(defaultCatalog.kind);
@@ -642,6 +654,8 @@ function CreateServerDialog({ snapshot, onClose, onCreate }: { snapshot: Launche
   const [displayName, setDisplayName] = useState("");
   const [version, setVersion] = useState(versions[0]?.version ?? "");
   const [memoryMb, setMemoryMb] = useState(4096);
+  const maxCpuCores = Math.max(1, window.navigator.hardwareConcurrency || 4);
+  const [cpuCores, setCpuCores] = useState(Math.min(2, maxCpuCores));
   const [vmcEnabled, setVmcEnabled] = useState(false);
   const [vmcMode, setVmcMode] = useState<NetworkMode>("public");
   const selectedVersion = useMemo(() => versions.find((v) => v.version === version) ?? null, [versions, version]);
@@ -656,7 +670,7 @@ function CreateServerDialog({ snapshot, onClose, onCreate }: { snapshot: Launche
   return (
     <motion.div
       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-      onClick={onClose}
+      onClick={busy ? undefined : onClose}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}
     >
       <motion.div
@@ -667,7 +681,7 @@ function CreateServerDialog({ snapshot, onClose, onCreate }: { snapshot: Launche
         <h2 style={{ margin: "0 0 6px", fontSize: 18, fontWeight: 700 }}>{t.createServer.title}</h2>
         <p style={{ margin: "0 0 24px", fontSize: 13, color: "var(--text-soft)" }}>{t.createServer.subtitle}</p>
 
-        <form onSubmit={(e) => { e.preventDefault(); void onCreate({ displayName, kind, version, memoryMb, vmcEnabled, vmcMode: vmcEnabled ? vmcMode : undefined }); }}
+        <form onSubmit={(e) => { e.preventDefault(); void onCreate({ displayName, kind, version, memoryMb, cpuCores, vmcEnabled, vmcMode: vmcEnabled ? vmcMode : undefined }); }}
           style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <FormField label={t.createServer.name}>
             <Input value={displayName} onChange={setDisplayName} placeholder={t.createServer.namePlaceholder} />
@@ -695,6 +709,17 @@ function CreateServerDialog({ snapshot, onClose, onCreate }: { snapshot: Launche
           <FormField label={t.createServer.memory}>
             <Input type="number" value={memoryMb} onChange={(v) => setMemoryMb(Number(v))} />
           </FormField>
+          <FormField label={t.createServer.cpuCores}>
+            <Input type="number" value={cpuCores} onChange={(v) => setCpuCores(Math.max(1, Math.min(maxCpuCores, Number(v) || 1)))} />
+            <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-muted)" }}>
+              {t.createServer.cpuCoresHint.replace("{max}", String(maxCpuCores))}
+            </div>
+          </FormField>
+          {selectedVersion && (
+            <div style={{ marginTop: -4, fontSize: 12, color: "var(--text-muted)" }}>
+              {t.createServer.requiredJava.replace("{version}", String(selectedVersion.javaVersion))}
+            </div>
+          )}
           {vmcEnabled && (
             <FormField label={t.createServer.visibility}>
               <Select value={vmcMode} onChange={(v) => setVmcMode(v as NetworkMode)}>
@@ -704,9 +729,26 @@ function CreateServerDialog({ snapshot, onClose, onCreate }: { snapshot: Launche
               </Select>
             </FormField>
           )}
+          {installationProgress && (
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "14px 16px", marginTop: 4 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
+                <strong style={{ fontSize: 13, color: "#fff" }}>{t.createServer.installingTitle}</strong>
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{installationProgress.percent}%</span>
+              </div>
+              <div style={{ height: 8, background: "rgba(255,255,255,0.06)", borderRadius: 999, overflow: "hidden", marginBottom: 8 }}>
+                <div style={{ width: `${installationProgress.percent}%`, height: "100%", background: "linear-gradient(90deg, var(--green) 0%, #8fdc62 100%)", transition: "width 0.2s ease" }} />
+              </div>
+              <div style={{ fontSize: 13, color: "#fff" }}>{installationProgress.detail}</div>
+              <div style={{ marginTop: 4, fontSize: 12, color: "var(--text-muted)" }}>
+                {t.createServer.stepLabel
+                  .replace("{current}", String(installationProgress.currentStep))
+                  .replace("{total}", String(installationProgress.totalSteps))}
+              </div>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 8 }}>
-            <Btn variant="ghost" onClick={onClose}>{t.cancel}</Btn>
-            <Btn variant="primary" type="submit">{t.createServer.cta}</Btn>
+            <Btn variant="ghost" onClick={onClose} disabled={busy}>{t.cancel}</Btn>
+            <Btn variant="primary" type="submit" disabled={busy}>{busy ? t.createServer.installing : t.createServer.cta}</Btn>
           </div>
         </form>
       </motion.div>
@@ -1788,6 +1830,7 @@ export function App() {
   const [feedback, setFeedback] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [authMode] = useState<"login" | "register">("login");
+  const [installationProgress, setInstallationProgress] = useState<InstallationProgress | null>(null);
 
   useEffect(() => {
     void refreshSnapshot();
@@ -1797,7 +1840,10 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const unsub = window.vmcLauncher.onEvent(() => {
+    const unsub = window.vmcLauncher.onEvent((event) => {
+      if (event.type === "installation-progress") {
+        setInstallationProgress(event.progress ?? null);
+      }
       void refreshSnapshot();
       if (route.kind === "server") void refreshServer(route.serverUuid);
     });
@@ -1855,9 +1901,11 @@ export function App() {
   }
   async function handleCreateServer(payload: CreateServerPayload) {
     await withFeedback(async () => {
+      setInstallationProgress(null);
       const server = await window.vmcLauncher.createServer(payload);
       await refreshSnapshot();
       setCreateOpen(false);
+      setInstallationProgress(null);
       await window.vmcLauncher.openServerWindow(server.serverUuid);
     });
   }
@@ -1985,7 +2033,7 @@ export function App() {
       <AnimatePresence>
         <AuthScreen snapshot={snapshot} onAuth={handleAuth} busy={busy} feedback={feedback} />
         <AnimatePresence>
-          {createOpen && <CreateServerDialog snapshot={snapshot} onClose={() => setCreateOpen(false)} onCreate={handleCreateServer} />}
+          {createOpen && <CreateServerDialog snapshot={snapshot} onClose={() => setCreateOpen(false)} onCreate={handleCreateServer} busy={busy} installationProgress={installationProgress} />}
           {renamingServer && <RenameServerDialog server={renamingServer} onClose={() => setRenamingServer(null)} onRename={performRename} />}
         </AnimatePresence>
       </AnimatePresence>
@@ -2076,7 +2124,7 @@ export function App() {
       </div>
 
       <AnimatePresence>
-        {createOpen && <CreateServerDialog snapshot={snapshot} onClose={() => setCreateOpen(false)} onCreate={handleCreateServer} />}
+        {createOpen && <CreateServerDialog snapshot={snapshot} onClose={() => setCreateOpen(false)} onCreate={handleCreateServer} busy={busy} installationProgress={installationProgress} />}
         {renamingServer && <RenameServerDialog server={renamingServer} onClose={() => setRenamingServer(null)} onRename={performRename} />}
       </AnimatePresence>
     </>

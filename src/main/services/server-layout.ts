@@ -4,7 +4,7 @@ import type { ServerKind } from "../../shared/contracts";
 export type AddonMode = "plugins" | "mods" | "unsupported";
 
 export function getRuntimeDirectoryName(kind: ServerKind): string {
-  return kind === "papermc" || kind === "purpur" ? "paper" : "server";
+  return kind === "papermc" ? "paper" : "server";
 }
 
 export function getRuntimeDirectory(rootDir: string, kind: ServerKind): string {
@@ -12,7 +12,7 @@ export function getRuntimeDirectory(rootDir: string, kind: ServerKind): string {
 }
 
 export function getAddonMode(kind: ServerKind): AddonMode {
-  if (kind === "papermc" || kind === "purpur") return "plugins";
+  if (kind === "papermc") return "plugins";
   if (kind === "fabric" || kind === "forge" || kind === "neoforge") return "mods";
   return "unsupported";
 }

@@ -1,4 +1,4 @@
-export type ServerKind = "vanilla" | "papermc" | "purpur" | "fabric" | "forge" | "neoforge";
+export type ServerKind = "vanilla" | "papermc" | "fabric" | "forge" | "neoforge";
 export type ServerStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 export type NetworkMode = "public" | "code" | "whitelist";
 export type NetworkState = "disabled" | "disconnected" | "connecting" | "connected" | "error";
@@ -54,6 +54,8 @@ export interface ServerRecord {
   kind: ServerKind;
   version: string;
   memoryMb: number;
+  cpuCores: number;
+  javaVersion: number;
   status: ServerStatus;
   createdAt: string;
   updatedAt: string;
@@ -150,6 +152,7 @@ export interface ServerCatalogEntry {
 export interface ServerCatalogVersionEntry {
   version: string;
   downloadUrl: string;
+  javaVersion: number;
   vmc: {
     compatible: boolean;
     patchUrl: string | null;
@@ -183,8 +186,19 @@ export interface CreateServerPayload {
   kind: ServerKind;
   version: string;
   memoryMb: number;
+  cpuCores: number;
   vmcEnabled?: boolean;
   vmcMode?: NetworkMode;
+}
+
+export interface InstallationProgress {
+  serverUuid: string | null;
+  stage: string;
+  detail: string;
+  currentStep: number;
+  totalSteps: number;
+  percent: number;
+  done: boolean;
 }
 
 export interface UpdateServerSettingsPayload {
@@ -198,8 +212,9 @@ export interface UpdateVmcSettingsPayload {
 }
 
 export interface LauncherEvent {
-  type: "state-changed" | "server-updated";
+  type: "state-changed" | "server-updated" | "installation-progress";
   serverUuid?: string;
+  progress?: InstallationProgress;
 }
 
 export interface VmcLauncherApi {
