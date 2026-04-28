@@ -60,6 +60,11 @@ const STATS_REFRESH_INTERVAL_MS = 1_000;
 const MAX_EDITABLE_FILE_BYTES = 1024 * 1024;
 const execFileAsync = promisify(execFile);
 
+const COMMON_JVM_FLAGS = [
+  "--enable-native-access=ALL-UNNAMED",
+  "-Djline.terminal=dumb",
+] as const;
+
 export class ServerManager {
   private readonly runtimes = new Map<string, RuntimeState>();
   private readonly consoleHistory = new Map<string, ConsoleLine[]>();
@@ -228,7 +233,6 @@ export class ServerManager {
         await this.authClient.deleteRemoteServer(token, this.stateStore.getDeviceId(), server.remoteServerId);
       } catch (err) {
         console.warn(`Echec de la suppression distante du serveur ${serverUuid}:`, err);
-        // On continue quand même la suppression locale
       }
     }
     
@@ -328,7 +332,7 @@ export class ServerManager {
           runtime,
           "velocity",
           javaExecutable,
-          ["-Xms512M", "-Xmx512M", "-jar", velocityJar],
+          ["-Xms512M", "-Xmx512M", ...COMMON_JVM_FLAGS, "-jar", velocityJar],
           path.join(server.rootDir, "velocity"),
         );
       }
@@ -580,6 +584,7 @@ export class ServerManager {
           `-XX:ActiveProcessorCount=${server.cpuCores}`,
           `-Xms${server.memoryMb}M`,
           `-Xmx${server.memoryMb}M`,
+          ...COMMON_JVM_FLAGS,
           `@${relativeUnixArgs}`,
         ],
       };
@@ -592,6 +597,7 @@ export class ServerManager {
         `-XX:ActiveProcessorCount=${server.cpuCores}`,
         `-Xms${server.memoryMb}M`,
         `-Xmx${server.memoryMb}M`,
+        ...COMMON_JVM_FLAGS,
         "-jar",
         serverJar,
         "--nogui",
@@ -781,7 +787,6 @@ export class ServerManager {
 
     const processStats = pids.length > 0 ? await collectProcessStats(pids) : { cpuPercent: 0, ramUsedMb: 0 };
     
-    // On ne recalcule le stockage que toutes les 30 secondes pour économiser les ressources
     let storageMb = runtime.stats.storageMb;
     const now = Date.now();
     if (!runtime.lastStorageCheck || now - runtime.lastStorageCheck > 30_000) {
@@ -933,7 +938,6 @@ export class ServerManager {
 
   async findAvailablePort(startPort: number): Promise<number> {
     let port = startPort;
-    // On vérifie aussi les ports déjà attribués en base
     const usedPorts = new Set(
       this.stateStore.getServers().flatMap(s => [s.paperPort, s.velocityPort].filter(Boolean) as number[])
     );
@@ -989,7 +993,7 @@ function checkPortAvailability(port: number): Promise<boolean> {
       if (err.code === "EADDRINUSE") {
         resolve(false);
       } else {
-        resolve(true); // Autre erreur, on assume que c'est ok ou géré plus tard
+        resolve(true);
       }
     });
     server.once("listening", () => {
@@ -1168,8 +1172,6 @@ async function collectPosixProcessStats(pids: number[]): Promise<Pick<ServerStat
 }
 
 async function collectWindowsProcessStats(pids: number[]): Promise<Pick<ServerStats, "cpuPercent" | "ramUsedMb">> {
-  // On utilise Get-Process pour la RAM (WorkingSet64)
-  // Pour le CPU on utilise Win32_PerfFormattedData_PerfProc_Process qui est déjà formaté en pourcentage
   const powershellScript = [
     `$ids = @(${pids.join(",")})`,
     "$p = Get-Process -Id $ids -ErrorAction SilentlyContinue",
@@ -1290,12 +1292,10 @@ async function walkManagedFiles(rootDir: string, currentDir: string, results: Se
         modifiedAt: fileStat.mtime.toISOString(),
       });
 
-      // On limite la récursion pour éviter de scanner tout le disque si un lien symbolique traîne
       if (entry.isDirectory() && relativePath.split(path.sep).length < 4) {
         await walkManagedFiles(rootDir, absolutePath, results);
       }
     } catch (err) {
-      // Le fichier a pu être supprimé entre le readdir et le stat (fréquent sur MC)
       console.debug(`[ServerManager] Fichier ignoré (disparu): ${absolutePath}`);
       continue;
     }
